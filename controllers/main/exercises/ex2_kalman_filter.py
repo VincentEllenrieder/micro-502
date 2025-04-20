@@ -18,10 +18,10 @@ class kalman_filter():
         self.initialize_KF(self.noise_std_GPS, self.noise_std_ACCEL)
 
         # Flags for use cases to test
-        self.use_direct_noisy_measurement = False # Enable this to test the drone response when the nosiy sensor measurement is used directly
-        self.use_direct_ground_truth_measurement = False # Enable this to test the drone response when the ground truth state is used directly
-        self.use_KF_measurement = True # Enable this to test the drone response when the Kalman Filter is used to estimate the state
-        self.use_accel_only = False # Enable this to test the drone response when only accelerometer measurements are used in the Kalman Filter (Part 2)
+        self.use_direct_noisy_measurement = False # Enable this to test the drone response when the nosiy sensor measurement is used directly --> noisy measurements directly fed to controller without KF
+        self.use_direct_ground_truth_measurement = False # Enable this to test the drone response when the ground truth state is used directly --> ground truth measurements fed to KF and estimate fed to controller (KF estimate should converge to ground truth, i.e. use this mode to check if KF is implemented correctly)
+        self.use_KF_measurement = True # Enable this to test the drone response when the Kalman Filter is used to estimate the state --> noisy measurements fed to KF and KF estimate fed to controller
+        self.use_accel_only = True # Enable this to test the drone response when only accelerometer measurements are used in the Kalman Filter (Part 2) --> only noisy accelerometer measurements fed to KF and KF estimate fed to controller
 
         # Simulation time after which plots are generated
         self.plot_time_limit = 30.0
@@ -46,8 +46,8 @@ class kalman_filter():
     
     def initialize_KF(self, noise_std_GPS, noise_std_ACCEL):
         # IMPORTANT: Assume the state vectors in the order: X = [x, v_x, a_x, y, v_y, a_y, z, v_z, a_z], Shape: (n_states,1)
-        # n_states = 9
-        # n_measurements = 3
+        n_states = 9
+        n_measurements = 3
 
         # Function to initialize the following as 2D numpy arrays:
         #   self.X_opt: Optimal state vector (n_states x 1) 
@@ -61,33 +61,18 @@ class kalman_filter():
         #   noise_std_ACCEL: Standard deviation of Accelerometer noise
         # YOUR CODE HERE
         # -----------------------------------
-        # self.X_opt = ...
-        # self.P_opt = ...
+        self.X_opt = np.random.rand(n_states, 1)
+        self.P_opt = np.diag(np.full(9, 100000))
 
-        # self.H_GPS = ...
-        # self.H_ACCEL = ...
+        self.H_GPS = [[1, 0, 0, 0, 0, 0, 0, 0, 0], 
+                      [0, 0, 0, 1, 0, 0, 0, 0, 0], 
+                      [0, 0, 0, 0, 0, 0, 1, 0, 0]]
+        self.H_ACCEL = [[0, 0, 1, 0, 0, 0, 0, 0, 0], 
+                        [0, 0, 0, 0, 0, 1, 0, 0, 0], 
+                        [0, 0, 0, 0, 0, 0, 0, 0, 1]]
 
-        # self.R_GPS = ...
-        # self.R_ACCEL = ...
-
-        # SAMPLE SOLUTION
-
-        # Initialize the state vector (self.X_opt) and the covariance matrix (self.P_opt) of the state estimate
-        self.X_opt = np.random.rand(9,1)
-        self.P_opt = 1e6*np.diag(np.ones(9))
-
-        # Define the Measurement Matrices (H) for both GPS and ACCELEROMETER measurements - Shape: (n_measurements x n_states)
-        self.H_GPS = np.array([[1,0,0,0,0,0,0,0,0],
-                               [0,0,0,1,0,0,0,0,0],
-                               [0,0,0,0,0,0,1,0,0]
-                              ])
-        self.H_ACCEL = np.array([[0,0,1,0,0,0,0,0,0],
-                                 [0,0,0,0,0,1,0,0,0],
-                                 [0,0,0,0,0,0,0,0,1]])
-
-        # Define the Measurement Covariance Matrices (R) for both GPS and ACCELEROMETER measurements - Shape: (n_measurements x n_measurements)
-        self.R_GPS = (noise_std_GPS**2)*np.eye(3)
-        self.R_ACCEL = (noise_std_ACCEL**2)*np.eye(3)
+        self.R_GPS = np.diag(np.full(3, noise_std_GPS))
+        self.R_ACCEL = np.diag(np.full(3, noise_std_ACCEL))
 
     def KF_state_propagation(self, dt):
         # Function that propagates the last fused state over a time-interval dt
@@ -111,17 +96,19 @@ class kalman_filter():
         # SAMPLE SOLUTION
 
         # Define the state transition matrix A_trans (n_states x n_states)
-        A_trans_sub = np.array([[1, dt, np.power(dt,2)/2],
-                                [0, 1, dt],
-                                [0, 0, 1]
-                               ])
-        A_trans = np.block([[A_trans_sub, np.zeros((3,6))],
-                            [np.zeros((3,3)), A_trans_sub, np.zeros((3,3,))],
-                            [np.zeros((3,6)), A_trans_sub]])
-        
+        A_trans = [[1, dt, 0.5*dt**2, 0, 0, 0, 0, 0, 0],
+                   [0, 1, dt, 0, 0, 0, 0, 0, 0],
+                   [0, 0, 1, 0, 0, 0, 0, 0, 0],
+                   [0, 0, 0, 1, dt, 0.5*dt**2, 0, 0, 0],
+                   [0, 0, 0, 0, 1, dt, 0, 0, 0],
+                   [0, 0, 0, 0, 0, 1, 0, 0, 0],
+                   [0, 0, 0, 0, 0, 0, 1, dt, 0.5*dt**2],
+                   [0, 0, 0, 0, 0, 0, 0, 1, dt],
+                   [0, 0, 0, 0, 0, 0, 0, 0, 1]]
+
         # Calculate the propagated state (X_pred) and the propagated covariance (P_pred) using the last fused state (self.X_opt) and covariance (self.P_opt)
-        X_pred = A_trans @ self.X_opt
-        P_pred = A_trans @ self.P_opt @ A_trans.transpose() + Q_trans
+        X_pred = A_trans @ self.X_opt # X_pred must be 2D array of shape (n_states, 1) Hint: Check the shape, if it does not match in your implementation use the .reshape(-1, 1) attribute
+        P_pred = A_trans @ self.P_opt @ np.transpose(A_trans) + Q_trans
 
         return X_pred, P_pred
 
@@ -139,15 +126,12 @@ class kalman_filter():
 
         # YOUR CODE HERE
         # -----------------------------------
-        # K = ...
-        # self.X_opt = ...
-        # self.P_opt = ...
+        # Calculate the Kalman Gain (K)
+        K = P_pred @ np.transpose(H) @ np.linalg.inv(H @ P_pred @ np.transpose(H) + R)
 
-        # SAMPLE SOLUTION
-
-        K = P_pred @ H.transpose() @ (np.linalg.inv(((H @ P_pred @ H.transpose()) + R)))
-        self.X_opt = X_pred + K @ (Z - (H @ X_pred))
-        self.P_opt = ((np.eye(9)) - K @ H) @ P_pred
+        # Use the KF update turle to obtain the optimal state estimate (self.X_opt) and optimal covariance (self.P_opt)
+        self.X_opt = X_pred + K @ (Z - H @ X_pred)
+        self.P_opt = (np.identity(9) - K @ H) @ P_pred
 
         return self.X_opt, self.P_opt
 
@@ -169,41 +153,34 @@ class kalman_filter():
         # YOUR CODE HERE
         # -----------------------------------
 
-        # X_prop, P_prop = ...
+        # Propagate the state to the current timestep
 
-        # # Sensor fusion dependant on measurement cases (sensor_flag)
-
-        # # Example implementation for case 3
-        # if sensor_state_flag == 3:
-        #     X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps)
-        #     X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel)
-
-        # SAMPLE SOLUTION
-
-        # Propagate 
         X_prop, P_prop = self.KF_state_propagation(dt_last_measurement)
+
+        # Perform the sensor fusion dependant on measurement case and the propagated step (sensor_state_flag cases 0,1,2,3)
         
-        # Calculate estimate depending on sensor state
-        if sensor_state_flag == 0:
-            X_est, P_est = X_prop, P_prop
         if sensor_state_flag == 1:
             H = self.H_GPS
             R = self.R_GPS
             Z = measured_state_gps
-            X_est, P_est = self.KF_sensor_fusion(X_prop,P_prop,H,R,Z)
-            # print("In GPS meas step")
-        if sensor_state_flag == 2:
+            X_est, P_est = self.KF_sensor_fusion(X_prop, P_prop, H, R, Z)
+        elif sensor_state_flag == 2:
             H = self.H_ACCEL
             R = self.R_ACCEL
             Z = measured_state_accel
-            X_est, P_est = self.KF_sensor_fusion(X_prop,P_prop,H,R,Z)
-            # print("In ACCEL meas step")
-        if sensor_state_flag == 3:
-            X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps)
-            X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel)
+            X_est, P_est = self.KF_sensor_fusion(X_prop, P_prop, H, R, Z)
+        elif sensor_state_flag == 3:
+            X_opt_gps, P_opt_gps = self.KF_sensor_fusion(X_prop, P_prop, self.H_GPS, self.R_GPS, measured_state_gps) #Fuse the GPS measurement with the propagated state
+            X_est, P_est = self.KF_sensor_fusion(X_opt_gps, P_opt_gps, self.H_ACCEL, self.R_ACCEL, measured_state_accel) #Fuse the fused GPS state (X_opt_gps) with the accelerometer measurement at the same timestep
+        else:
+            X_est = X_prop
+            P_est = P_prop
 
         return X_est, P_est
     
+    ## Part 1 ==> Sensor values are ground truth, i.e. there is no noise and they are perfectly accurate. This means that the Kalman Filter will be yield the same results as the ground truth.
+    ## Part 2 ==> Sensor values are noisy, but only accelerometer values are used in the Kalman Filter. This means that the Kalman Filter will be able to estimate the state using only the accelerometer values.
+
     # --------------------------------------------------------- WORK ONLY UP TO HERE --------------------------------------------------------------------------------- #
 
     def calculate_Q(self, dt_tr, q_tr):

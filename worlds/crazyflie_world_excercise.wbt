@@ -1,13 +1,10 @@
-#VRML_SIM R2023a utf8
+#VRML_SIM R2023b utf8
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/Floor.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/SandyGround.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/road/protos/Road.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Pavement.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/robots/bitcraze/crazyflie/protos/Crazyflie.proto"
-
 
 WorldInfo {
   info [
@@ -21,8 +18,8 @@ WorldInfo {
   }
 }
 Viewpoint {
-  orientation 0 0.5 0 0.5
-  position -5.5 1.5 4.5
+  orientation 0.024958325219188178 0.998125014057268 -0.05588862420414179 0.8413983811527173
+  position -11.825092228481944 1.4701145986839168 16.397231384627094
   near 0.2
   follow "CRAZYFLIE_8"
   followType "Mounted Shot"
@@ -40,19 +37,20 @@ Floor {
   }
 }
 Crazyflie {
-  translation 0.9660470000000083 0.8372480000000008 0.12
-  rotation 1.4432514312069223e-13 -7.094951043479413e-14 1 0.004202810932212425
+  hidden linearVelocity_0 0.00998644758689676 0.016887927565118928 -0.1650597049523344
+  hidden angularVelocity_0 0.03790727351913805 0.2359845959193047 0.13243706956385032
+  translation 1.5938330773459473 -0.06111236504109594 2.2299298816264064
+  rotation 0.059820147381570474 -0.06458147293968988 -0.9961178561396172 -0.2260115937447944
   name "crazyflie"
   controller "main"
   supervisor TRUE
   extensionSlot [
     DEF CF_CAMERA Camera {
+      name "cf_camera"
+      fieldOfView 1.5
       width 300
       height 300
       near 0.2
-      fieldOfView 1.5
-      projection "planar"
-      name "cf_camera"
     }
     DistanceSensor {
       translation -0.0106777 -0.00872367 0.013
@@ -67,10 +65,6 @@ Crazyflie {
       aperture 0.005
     }
     Accelerometer {
-      xAxis TRUE
-      yAxis TRUE
-      zAxis TRUE
-      resolution -1
     }
   ]
 }

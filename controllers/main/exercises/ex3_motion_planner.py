@@ -61,14 +61,11 @@ class MotionPlanner3D():
         # TASK: Fill in the constraint factor matrix values where each row corresponds to the positions, velocities, accelerations, snap and jerk here
         # SOLUTION ---------------------------------------------------------------------------------- ## 
         
-        A_m = np.array([
-            [t**5, t**4, t**3, t**2, t, 1], #pos
-            [5*(t**4), 4*(t**3), 3*(t**2), 2*t, 1, 0], #vel
-            [20*(t**3), 12*(t**2), 6*t, 2, 0, 0], #acc  
-            [60*(t**2), 24*t, 6, 0, 0, 0], #jerk
-            [120*t, 24, 0, 0, 0, 0] #snap
-        ])
-
+        A_m = np.array([[1, t, t**2, t**3, t**4, t**5],
+                        [0, 1, 2*t, 3*t**2, 4*t**3, 5*t**4],
+                        [0, 0, 2, 6*t, 12*t**2, 20*t**3],
+                        [0, 0, 0, 6, 24*t, 60*t**2],
+                        [0, 0, 0, 0, 24, 120*t]])
         return A_m
 
     def compute_poly_coefficients(self, path_waypoints):
@@ -106,56 +103,31 @@ class MotionPlanner3D():
                 v_f, a_f = 0, 0
                 A_f = self.compute_poly_matrix(seg_times[i]) # A_f gives the constraint factor matrix A_m for a segment i at its relative end time t=seg_times[i]
                 if i == 0: # First path segment
-                #     # 1. Implement the initial constraints here for the first segment using A_0
-                #     # 2. Implement the final position and the continuity constraints for velocity, acceleration, snap and jerk at the end of the first segment here using A_0 and A_f (check hints in the exercise description)
-                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
-                    b[row] = pos_0
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
-                    b[row] = pos_f
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_0[1] #Initial velocity constraint
-                    b[row] = v_0
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_0[2] #Initial acceleration constraint
-                    b[row] = a_0
-                    row += 1
-                    #Continuity of velocity, acceleration, jerk, snap
-                    A[row:row+4, i*6:(i+1)*6] = A_f[1:]
-                    A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
-                    b[row:row+4] = np.zeros(4)
-                    row += 4
+                    # 1. Implement the initial constraints here for the first segment using A_0
+                    A[0:3, 0:6] = A_0[0:3, :]                           # A_0 is a 3 x 6 matrix, we need to convert it to a 3 x 6(m-1) matrix with zeros for the rest in order to put it in the right place in A
+                    b[0:3] = [pos_0, v_0, a_0]                          # 2. Implement the final position and the continuity constraints for velocity, acceleration, snap and jerk at the end of the first segment here using A_0 and A_f (check hints in the exercise description)
+                    # 2. Implement the final position and the continuity constraints for velocity, acceleration, snap and jerk at the end of the first segment here using A_0 and A_f (check hints in the exercise description)
+                    A[4, 0:6] = A_f[0, :]
+                    A[5:9, 0:6] = A_0[1:5, :]
+                    A[5:9, 6:12] = -A_f[1:5, :]                                 
+                    b[3:9] = [pos_f, 0, 0, 0, 0, 0]                         
                 elif i < m-2: # Intermediate path segments
-                #     # 1. Similarly, implement the initial and final position constraints here for each intermediate path segment
-                #     # 2. Similarly, implement the end of the continuity constraints for velocity, acceleration, snap and jerk at the end of each intermediate segment here using A_0 and A_f
-                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
-                    b[row] = pos_0
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
-                    b[row] = pos_f
-                    row += 1
-                    #Continuity of velocity, acceleration, jerk and snap
-                    A[row:row+4, i*6:(i+1)*6] = A_f[1:]
-                    A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
-                    b[row:row+4] = np.zeros(4)
-                    row += 4
+                    # 1. Similarly, implement the initial and final position constraints here for each intermediate path segment
+                    # 2. Similarly, implement the end of the continuity constraints for velocity, acceleration, snap and jerk at the end of each intermediate segment here using A_0 and A_f
+                    A[i*6+2, i*6:i*6+6] = A_0[0, :]
+                    A[i*6+3:i*6+7, i*6:i*6+6] = A_0[1:5, :]
+                    A[i*6+3:i*6+7, (i+1)*6:(i+1)*6+6] = -A_f[1:5, :]
+                    A[i*6+7, i*6:i*6+6] = A_f[0, :]
+                    b[i*6+3:i*6+9] = [pos_0, 0, 0, 0, 0, pos_f]
                 elif i == m-2: #Final path segment
-                #     # 1. Implement the initial and final position, velocity and accelerations constraints here for the final path segment using A_0 and A_f
-                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
-                    b[row] = pos_0
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
-                    b[row] = pos_f
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_f[1] #Final velocity constraint
-                    b[row] = v_f
-                    row += 1
-                    A[row, i*6:(i+1)*6] = A_f[2] #Final acceleration constraint
-                    b[row] = a_f
-                    row += 1
+                    # 1. Implement the initial and final position, velocity and accelerations constraints here for the final path segment using A_0 and A_f
+                    A[(m-2)*6 + 2, (m-2)*6:(m-2)*6+6] = A_0[0, :]   
+                    A[(m-2)*6 + 3:(m-2)*6 + 6, (m-2)*6:(m-2)*6+6] = A_f[0:3, :]
+                    b[(m-2)*6 + 3:(m-2)*6 + 6] = [pos_f, v_f, a_f]
             # Solve for the polynomial coefficients for the dimension dim
-
-            poly_coeffs[:,dim] = np.linalg.solve(A, b)   
+            print(A)
+            print(b)
+            poly_coeffs[:,dim] = np.linalg.solve(A, b)
 
         return poly_coeffs
 

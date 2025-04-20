@@ -13,10 +13,12 @@ from scipy.spatial.transform import Rotation as R
 import lib.mapping_and_planning_examples as mapping_and_planning_examples
 import time, random
 import threading
+import cv2 as cv
+import matplotlib.pyplot as plt # to erase for assignment
 
-exp_num = 4                    # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
+exp_num = 4                         # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
 control_style = 'path_planner'      # 'keyboard' or 'path_planner'
-rand_env = False                # Randomise the environment
+rand_env = False                    # Randomise the environment
 
 # Global variables for handling threads
 latest_sensor_data = None
@@ -534,9 +536,8 @@ class CrazyflieInDroneDome(Supervisor):
     # Read the camera feed
     def read_camera(self):
 
-        # Read the camera image in BRGA format
+        # Read the camera image in BGRA format
         camera_image = self.camera.getImage()
-
         # Convert the image to a numpy array for OpenCV
         image = np.frombuffer(camera_image, np.uint8).reshape((self.camera.getHeight(), self.camera.getWidth(), 4))
 
@@ -721,6 +722,10 @@ if __name__ == '__main__':
 
                         # Read the camera feed
                         camera_data = drone.read_camera()
+                         
+                        # # Show camera using openCV
+                        # cv.imshow("Camera Feed", camera_data)
+                        # cv.waitKey(1)
                         
                         # Update the sensor data in the thread
                         with sensor_lock:
