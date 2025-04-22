@@ -100,7 +100,7 @@ p_q_vectors = np.zeros((3, N_IMAGES))                                   # Camera
 # Camera parameters
 FOCAL_LENGTH = 161.013922282    # Focal length of the camera in pixels
 X_CAM = 0.030                   # x position of the camera relative to the body frame in meters
-Y_CAM = 0.030                   # y position of the camera relative to the body frame in meters
+Y_CAM = 0.000                   # y position of the camera relative to the body frame in meters
 Z_CAM = 0.010                   # z position of the camera relative to the body frame in meters
 
 # Thresholds for pink gate detection
@@ -205,25 +205,32 @@ def get_command(sensor_data, camera_data, dt):
                 r_s_vectors[:, images_taken] = R_c2i @ v_vector # Rotate the camera vector to the inertial frame
 
                 cam_offset_body = np.array([X_CAM, Y_CAM, Z_CAM])
-                cam_offset_inertial = R_c2i @ cam_offset_body
+                cam_offset_inertial = R_b2i @ cam_offset_body
                 position = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) + cam_offset_inertial # Position of the camera in the inertial frame
                 p_q_vectors[:, images_taken] = position 
                 print('Camera position : ', position)
-
+            
                 images_taken += 1
                 print("Image ", images_taken, " taken")
+        
 
-            # case of 2 images taken for triangulation :
-            r_s_vectors[:, 1] = -r_s_vectors[:, 1]            
-            p_q_vector = p_q_vectors[:, 1] - p_q_vectors[:, 0] 
-            line_coefficients = np.linalg.pinv(r_s_vectors) @ p_q_vector
-            print("Line coefficients: ", line_coefficients)
-            f = p_q_vectors[:, 0] + line_coefficients[0] * r_s_vectors[:, 0]
-            g = p_q_vectors[:, 1] + line_coefficients[1] * r_s_vectors[:, 1]
+            r = r_s_vectors[:, 0]
+            s = r_s_vectors[:, 1]
+            p = p_q_vectors[:, 0]
+            q = p_q_vectors[:, 1]
+            A = np.array([[np.dot(r, r), -np.dot(r, s)],
+                          [np.dot(s, r), -np.dot(s, s)]])
+            b = np.array([np.dot((q - p), r), np.dot((q - p), s)])
+            sol = np.linalg.solve(A,b)
+            lambda_ = sol[0]
+            mu = sol[1]
+            print("Line coefficients: ", lambda_, mu)
+            f = p + lambda_ * r
+            g = q + mu * s
             gate_position = (f + g) / 2
             print("Gate position: ", gate_position)
             gates.append(gate_position) 
-        
+
             deviated = False
             aligned = False
             r_s_vectors = np.zeros((3, N_IMAGES))                                   
@@ -247,7 +254,8 @@ def get_command(sensor_data, camera_data, dt):
             gates_found += 1
             MANEUVER["Go to gate"] = 0
             MANEUVER["Search next gate"] = 1
-            raise Exception('testing code')
+            if gates_found == 5:
+                raise Exception('testing code')
             control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
             return control_command
             
