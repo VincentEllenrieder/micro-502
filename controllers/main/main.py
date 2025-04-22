@@ -14,10 +14,10 @@ import lib.mapping_and_planning_examples as mapping_and_planning_examples
 import time, random
 import threading
 import cv2 as cv
-import matplotlib.pyplot as plt # to erase for assignment
+import matplotlib.pyplot as plt     # to DELETE for assignment
 
 exp_num = 4                         # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
-control_style = 'path_planner'      # 'keyboard' or 'path_planner'
+control_style = 'path_planner'          # 'keyboard' or 'path_planner'
 rand_env = False                    # Randomise the environment
 
 # Global variables for handling threads
@@ -724,7 +724,7 @@ if __name__ == '__main__':
                         # Read the camera feed
                         camera_data = drone.read_camera()
                          
-                        # # Show camera using openCV
+                        # # Show camera using openCV DELETE for assignment
                         # cv.imshow("Camera Feed", camera_data)
                         # cv.waitKey(1)
                         
