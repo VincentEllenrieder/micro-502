@@ -205,10 +205,10 @@ def get_command(sensor_data, camera_data, dt):
                 r_s_vectors[:, images_taken] = R_c2i @ v_vector # Rotate the camera vector to the inertial frame
 
                 cam_offset_body = np.array([X_CAM, Y_CAM, Z_CAM])
-                cam_offset_inertial = R_b2i @ cam_offset_body
+                cam_offset_inertial = R_c2i @ cam_offset_body
                 position = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) + cam_offset_inertial # Position of the camera in the inertial frame
                 p_q_vectors[:, images_taken] = position 
-                print(position)
+                print('Camera position : ', position)
 
                 images_taken += 1
                 print("Image ", images_taken, " taken")
@@ -217,6 +217,7 @@ def get_command(sensor_data, camera_data, dt):
             r_s_vectors[:, 1] = -r_s_vectors[:, 1]            
             p_q_vector = p_q_vectors[:, 1] - p_q_vectors[:, 0] 
             line_coefficients = np.linalg.pinv(r_s_vectors) @ p_q_vector
+            print("Line coefficients: ", line_coefficients)
             f = p_q_vectors[:, 0] + line_coefficients[0] * r_s_vectors[:, 0]
             g = p_q_vectors[:, 1] + line_coefficients[1] * r_s_vectors[:, 1]
             gate_position = (f + g) / 2
