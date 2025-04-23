@@ -3,7 +3,6 @@ import time
 import cv2
 from lib.simple_pid import PID  # Assuming your PID class is here
 import matplotlib.pyplot as plt # to erase for assignment
-import time
 
 
 
@@ -40,14 +39,28 @@ MANEUVER = {
     "Vision" : 0,
     # --- Go to gate ---
     "Go to gate" : 0,
-    # -- Start race ---
+    # --- Race ---
+    "Start race" : 0,
     "Race" : 0,
     # --- Finish ---
     "Finish": 0
 }
 
-# Take off height
-TAKEOFF_Z = 1.0
+# Camera parameters
+FOCAL_LENGTH = 161.013922282    # Focal length of the camera in pixels
+X_CAM = 0.030                   # x position of the camera relative to the body frame in meters
+Y_CAM = 0.000                   # y position of the camera relative to the body frame in meters
+Z_CAM = 0.010                   # z position of the camera relative to the body frame in meters
+
+# Thresholds for pink gate detection
+RED_BLUE_THRESHOLD_HIGH = 230   # 190 < R, B < 230
+RED_BLUE_THRESHOLD_LOW = 190 
+GREEN_THRESHOLD = 180           # G < 180 
+
+# Start position of the drone
+X_START = 1.0
+Y_START = 4.0
+Z_START = 1.0
 
 # Scan locations
 R = 0.5 # Radius of the scan circle
@@ -89,39 +102,31 @@ images_taken = 0                                                        # Number
 ALIGNMENT_MARGIN = 15                                                   # Margin to consider drone aligned with gate centroid
 CENTROID_YAW_PID = PID(Kp=0.005, Ki=0.0003, Kd=0.001, output_limits=(-np.pi/20, np.pi/20))   # PID controller for centroid alignment
 CENTROID_YAW_PID.setpoint = 0                                           # Alignment in Y should be at center of image     
-R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotation matrix from camera frame to body frame   
-DELAY = 0.5                                                             # Time delay between 2 images taken [s]
-current_time = 0.0                                                      # Current time for time delay
+R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotation matrix from camera frame to body frame 
+no_centroid = False                                                     # Flag to check if no centroid was found in the image  
 aligned = False                                                         # Flag to check if drone has aligned with gate centroid
 deviated = False                                                        # Flag to check if drone has deviated for second image     
 r_s_vectors = np.zeros((3, N_IMAGES))                                   # Centroid image vectors in inertial frame  
 p_q_vectors = np.zeros((3, N_IMAGES))                                   # Camera positions in inertial frame  
 
-# Camera parameters
-FOCAL_LENGTH = 161.013922282    # Focal length of the camera in pixels
-X_CAM = 0.030                   # x position of the camera relative to the body frame in meters
-Y_CAM = 0.000                   # y position of the camera relative to the body frame in meters
-Z_CAM = 0.010                   # z position of the camera relative to the body frame in meters
-
-# Thresholds for pink gate detection
-RED_BLUE_THRESHOLD_HIGH = 230   # 190 < R, B < 230
-RED_BLUE_THRESHOLD_LOW = 190 
-GREEN_THRESHOLD = 180           # G < 180 
-
 # Gates data
 gates_found = 0
 gates = []
+GATE_Z_CORRECTION = 0.1                                                # drone goes up when going through the gate due to path planning and destination goal being a few centimeters after the gate for margin
+
+# General purpose registers
+displacement_goal = [0, 0, 0]   # Saved current displacement goal
 
 def get_command(sensor_data, camera_data, dt):
     
-    global MANEUVER, images_taken, gates_found, gates, aligned, deviated, r_s_vectors, p_q_vectors, current_time
+    global MANEUVER, images_taken, gates_found, gates, aligned, deviated, r_s_vectors, p_q_vectors, displacement_goal, no_centroid
 
     # Drone has not taken off
     if MANEUVER["Started"] == 0 :
         print('in Started', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
 
-        if sensor_data['z_global'] < TAKEOFF_Z :
-            control_command = [sensor_data['x_global'], sensor_data['y_global'], TAKEOFF_Z, sensor_data['yaw']]
+        if sensor_data['z_global'] < Z_START :
+            control_command = [sensor_data['x_global'], sensor_data['y_global'], Z_START, sensor_data['yaw']]
             return control_command 
 
         else:
@@ -143,7 +148,7 @@ def get_command(sensor_data, camera_data, dt):
             if (scan_location["SCAN_X"] - POS_MARGIN < sensor_data['x_global'] < scan_location["SCAN_X"] + POS_MARGIN) and \
                (scan_location["SCAN_Y"] - POS_MARGIN < sensor_data['y_global'] < scan_location["SCAN_Y"] + POS_MARGIN) and \
                (scan_location["SCAN_YAW"] - YAW_MARGIN < sensor_data['yaw'] < scan_location["SCAN_YAW"] + YAW_MARGIN) and \
-               (TAKEOFF_Z - POS_MARGIN < sensor_data['z_global'] < TAKEOFF_Z + POS_MARGIN) :
+               (Z_START - POS_MARGIN < sensor_data['z_global'] < Z_START + POS_MARGIN) :
                 print("At scan location")
                 MANEUVER["Go to scan"] = 0
                 MANEUVER["Vision"] = 1
@@ -153,7 +158,7 @@ def get_command(sensor_data, camera_data, dt):
             # Go to scan location if not there yet
             else :
                 print("Not at scan location")
-                control_command = [scan_location["SCAN_X"], scan_location["SCAN_Y"], TAKEOFF_Z, scan_location["SCAN_YAW"]]
+                control_command = [scan_location["SCAN_X"], scan_location["SCAN_Y"], Z_START, scan_location["SCAN_YAW"]]
                 return control_command
             
         elif MANEUVER["Vision"] == 1:
@@ -161,14 +166,29 @@ def get_command(sensor_data, camera_data, dt):
             
             while images_taken < N_IMAGES:
                 
-                centroid = get_centroid(camera_data)
-                print("Centroid: ", centroid)
+                if no_centroid == False:
+                    centroid = get_centroid(camera_data)
+                    print("Centroid: ", centroid)
+                    if centroid == None: # if no controid found, prepare to displace
+                        print("No centroid found")
+                        no_centroid = True
+                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.3, deviation=0.0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
+                        print("Setting displacement goal after no centroid was found: ", displacement_goal)
 
-                # If no centroid found (orthogonal alignment with gate), displace
-                if centroid == None:
-                    print("No centroid found")
-                    control_command = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'])
-                    return control_command
+                # If no centroid found (orthogonal alignment with gate or very narrow contour) do :
+                if no_centroid == True :
+                    # If at displacement goal, stop displacement maneuver
+                    if (displacement_goal[0] - POS_MARGIN < sensor_data['x_global'] < displacement_goal[0] + POS_MARGIN) and \
+                       (displacement_goal[1] - POS_MARGIN < sensor_data['y_global'] < displacement_goal[1] + POS_MARGIN) :
+                        print("At displacement goal after no centroid was found")
+                        no_centroid = False
+                        control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                        return control_command
+                    # If not at displacement goal, displace
+                    else :
+                        print("Moving to displacement goal after no centroid was found")
+                        control_command = displacement_goal
+                        return control_command
                 
                 # If 1 image already taken (gate found), align drone to the centroid of the gate and displace before taking the next image for better triangulation
                 if images_taken != 0:
@@ -183,21 +203,13 @@ def get_command(sensor_data, camera_data, dt):
                     CENTROID_YAW_PID.reset()    # Anti-windup reset                     
                     aligned = True
 
-                    deviation = displacement(p_q_vectors[:, 0], sensor_data['yaw'], deviation=0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
+                    deviation = displacement(p_q_vectors[:, 0], sensor_data['yaw'], move_radius=0.2, deviation=0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
                     if not ((deviation[0] - POS_MARGIN < sensor_data['x_global'] < deviation[0] + POS_MARGIN) and \
                             (deviation[1] - POS_MARGIN < sensor_data['y_global'] < deviation[1] + POS_MARGIN)) and (not deviated) :
                         print("Deviating")
                         control_command = deviation
                         return control_command
                     deviated = True
-                    # if current_time == 0.0: # if timer not started yet, start it 
-                    #     current_time = time.time()
-
-                    # print(time.time() - current_time)
-                    # if time.time() - current_time < DELAY: # move for DELAY seconds before taking the next image
-                    #     print("Deviating")
-                    #     control_command = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], deviation = 0) 
-                    #     return control_command
 
                 v_vector = (np.array([centroid[0], centroid[1], FOCAL_LENGTH]))                
                 R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']]) 
@@ -233,6 +245,7 @@ def get_command(sensor_data, camera_data, dt):
 
             deviated = False
             aligned = False
+            images_taken = 0
             r_s_vectors = np.zeros((3, N_IMAGES))                                   
             p_q_vectors = np.zeros((3, N_IMAGES))                                   
             MANEUVER["Vision"] = 0
@@ -244,7 +257,7 @@ def get_command(sensor_data, camera_data, dt):
     elif MANEUVER["Go to gate"] == 1:
         print('in Go to gate', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
         
-        goal = displacement([gates[gates_found][0], gates[gates_found][1], sensor_data['z_global']], sensor_data['yaw'], deviation=0) # Displace until slightly after gate position to go through the gate
+        goal = displacement([gates[gates_found][0], gates[gates_found][1], gates[gates_found][2] - GATE_Z_CORRECTION], sensor_data['yaw'], move_radius=0.75, deviation=0) # Displace until slightly after gate position to go through the gate
         print("Goal: ", goal)
         if (goal[0] - POS_MARGIN < sensor_data['x_global'] < goal[0] + POS_MARGIN) and \
            (goal[1] - POS_MARGIN < sensor_data['y_global'] < goal[1] + POS_MARGIN) and \
@@ -252,17 +265,42 @@ def get_command(sensor_data, camera_data, dt):
            (goal[3] - YAW_MARGIN < sensor_data['yaw'] < goal[3] + YAW_MARGIN) :
             print("At gate position")
             gates_found += 1
-            MANEUVER["Go to gate"] = 0
-            MANEUVER["Search next gate"] = 1
-            if gates_found == 5:
-                raise Exception('testing code')
-            control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
-            return control_command
-            
+            if gates_found < 5:
+                MANEUVER["Go to gate"] = 0
+                MANEUVER["Search next gate"] = 1
+                MANEUVER["Go to scan"] = 1
+                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                return control_command
+            else :
+                MANEUVER["Go to gate"] = 0
+                MANEUVER["Start race"] = 1
+                print("Gates found : \n", len(gates), gates)            
+                raise Exception('testing code')            
+                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                return control_command
         else:
             print("Moving to gate position")
             control_command = goal
             return control_command
+
+    elif MANEUVER['Start race'] == 1:
+        print('in Start race', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
+        if (X_START - POS_MARGIN < sensor_data['x_global'] < X_START + POS_MARGIN) and \
+           (Y_START - POS_MARGIN < sensor_data['y_global'] < Y_START + POS_MARGIN) and \
+           (Z_START - POS_MARGIN < sensor_data['z_global'] < Z_START + POS_MARGIN) :
+            print("At start position")
+            MANEUVER['Start race'] = 0
+            MANEUVER['Race'] = 1
+            control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+            return control_command
+        else:
+            print("Moving to starting block to begin racing")
+            control_command = [X_START, Y_START, Z_START, sensor_data['yaw']]
+            return control_command
+
+    elif MANEUVER['Race'] == 1:
+        print('in Race', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
+        
 
     else:   
         print('in else')
@@ -297,9 +335,13 @@ def get_centroid(camera_data):
     elif len(contours) == 1:
         contour = contours[0]
 
-        cv2.drawContours(image_contours, [contour], 0, (0, 255, 0), 1)          
+        cv2.drawContours(image_contours, [contour], 0, (0, 255, 0), 1)
+        plt.imsave('image_analysis/gate_single_contour.png' + str(images_taken+1) + '.png', image_contours[:, :, :])          
 
-        cX, cY = compute_centroid(contour)                                      
+        result = compute_centroid(contour)      
+        if result == None:
+            return None
+        cX, cY = result                                
         centroid = cX - 150, cY - 150       # Shift centroid to center of image
 
         image_contours[cY, cX, 0] = 255     # Set the centroid pixel to red
@@ -311,11 +353,15 @@ def get_centroid(camera_data):
     elif len(contours) > 1:
 
         cv2.drawContours(image_contours, contours, -1, (0, 255, 0), 1)
+        plt.imsave('image_analysis/gate_multiple_contour.png' + str(images_taken+1) + '.png', image_contours[:, :, :])          
 
         rightmost = 0
         cX, cY = 0, 0
         for contour in contours:
-            x, y = compute_centroid(contour)
+            result = compute_centroid(contour)
+            if result == None:
+                return None
+            x, y = result
             if x > rightmost:
                 rightmost = x                   # Take the rightmost centroid
                 centroid = x - 150, y - 150     # Shift centroid to center of image
@@ -331,39 +377,34 @@ def compute_centroid(contours):
     if M["m00"] != 0:
         cX = int(M["m10"] / M["m00"])
         cY = int(M["m01"] / M["m00"])
+        return cX, cY
     else:
         print("Error computing centroid")
-    return cX, cY
+        return None
 
-def quaternion2rotmat(quaternion):
-        
-        R = np.eye(3)
-        
+def quaternion2rotmat(quaternion):      
         # Inputs:
         #           quaternion: A list of 4 numbers [x, y, z, w] that represents the quaternion
         # Outputs:
         #           R: A 3x3 numpy array that represents the rotation matrix of the quaternion
 
+        R = np.eye(3)
         x, y, z, w = quaternion
-        
         R = np.array([[1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
                     [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
                     [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]])
         return R
 
 def displacement(initial_position, yaw, move_radius = 0.5, deviation = 0.2, in_yaw_direction = 1):
+        # Inputs:
+        #          initial_position: position [x, y, z] in inertial frame
+        #          yaw: yaw angle in radians
+        #          move_radius: radius of the circle to move around the initial position
+        #          deviation: additional deviation to add to the displacement vector, randomly generated between -deviation and deviation
+        # Outputs:
+        #          command: output command [x, y, z, yaw] to be sent to drone
+
     goal_x = initial_position[0] + move_radius * np.cos(yaw*in_yaw_direction) + deviation * (2*np.random.rand() - 1) # slightly displace from the current x position 
     goal_y = initial_position[1] + move_radius * np.sin(yaw*in_yaw_direction) + deviation * (2*np.random.rand() - 1) # slightly displace from the current y position 
     command = [goal_x, goal_y, initial_position[2], yaw] 
     return command
-
-# def deviate_z(sensor_data, deviation = 0.2):
-#     goal_z = sensor_data['z_global'] + deviation # slightly deviate from the current z position
-#     command = [sensor_data['x_global'], sensor_data['y_global'], goal_z, sensor_data['yaw']]
-#     return command
-
-    # # Take off example
-    # if sensor_data['z_global'] < 0.49:
-    #     control_command = [sensor_data['x_global'], sensor_data['y_global'], 1.0, sensor_data['yaw']] # Ordered as array with: [pos_x_cmd, pos_y_cmd, pos_z_cmd, yaw_cmd] in meters and radians
-    
-    #     return control_command
