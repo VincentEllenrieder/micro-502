@@ -17,8 +17,12 @@ import cv2 as cv
 import matplotlib.pyplot as plt     # to DELETE for assignment
 
 exp_num = 4                         # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
-control_style = 'path_planner'          # 'keyboard' or 'path_planner'
-rand_env = False                    # Randomise the environment
+control_style = 'path_planner'      # 'keyboard' or 'path_planner'
+SEED = 34                           # (to erase for assignment) tricky seeds : 33, 34 
+np.random.seed(SEED)
+random.seed(SEED)
+rand_env = True                    # Randomise the environment
+
 
 # Global variables for handling threads
 latest_sensor_data = None

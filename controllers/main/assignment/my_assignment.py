@@ -73,7 +73,7 @@ GREEN_THRESHOLD = 180           # G < 180
 # Start position of the drone
 X_START = 1.0
 Y_START = 4.0
-Z_START = 1.0
+Z_START = 1.3
 
 # Scan locations
 R = 0.5 # Radius of the scan circle
@@ -109,16 +109,20 @@ SCAN_LOCATIONS = {
 POS_MARGIN = 0.05
 YAW_MARGIN = np.pi/16
 
-# Triangulation parameters
+# Drone placement paramenters for picture taking in 1st lap
 N_IMAGES = 2                                                            # Number of images to take for triangulation
 images_taken = 0                                                        # Number of images taken for triangulation
 ALIGNMENT_MARGIN = 15                                                   # Margin to consider drone aligned with gate centroid
 CENTROID_YAW_PID = PID(Kp=0.005, Ki=0.0003, Kd=0.001, output_limits=(-np.pi/20, np.pi/20))   # PID controller for centroid alignment
-CENTROID_YAW_PID.setpoint = 0                                           # Alignment in Y should be at center of image     
-R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotation matrix from camera frame to body frame 
+CENTROID_YAW_PID.setpoint = 0                                           # Alignment in Y should be at center of image  
 no_features = False                                                     # Flag to check if no centroid was found in the image  
 aligned = False                                                         # Flag to check if drone has aligned with gate centroid
-deviated = False                                                        # Flag to check if drone has deviated for second image     
+deviated = False                                                        # Flag to check if drone has deviated for second image
+current_image_corners = None                                            # Current image corners of the gate
+
+
+# Triangulation parameters
+R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotation matrix from camera frame to body frame 
 r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Image vectors in inertial frame of the 4 corners + centroid of the current gate taken in images 1 and 2
 p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Camera positions in inertial frame when 4 corners + centroid of the current gate were taken in images 1 and 2 
 
@@ -130,7 +134,7 @@ reached_normalpt2 = False                                               # Flag t
 VEL_LIM = 7.0                                                           # Velocity limit in m/s
 ACC_LIM = 50.0                                                          # Acceleration limit in m/s^2
 DISC_STEPS = 20                                                         # Number of discrete steps per segment for the trajectory planning
-T_FINAL = 20                                                            # Time to finish both racing laps in seconds
+T_FINAL = 30                                                            # Time to finish both racing laps in seconds
 ANGLE_PENALTY = 1.0                                                     # Penalty for path choice with high turning angles
 
 # General purpose registers
@@ -140,7 +144,7 @@ displacement_goal = np.zeros(3)   # Saved current displacement goal
 
 def get_command(sensor_data, camera_data, dt):
     
-    global MANEUVER, images_taken, gates_found, no_features, aligned, deviated, displacement_goal, \
+    global MANEUVER, images_taken, gates_found, no_features, aligned, deviated, displacement_goal, current_image_corners, \
                     r_s_vectors, p_q_vectors, GATES_DATA, reached_normalpt1, reached_normalpt2, \
                     race_waypoints, race_indices, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
 
@@ -189,17 +193,20 @@ def get_command(sensor_data, camera_data, dt):
             
             while images_taken < N_IMAGES:
                 
-                if no_features == False:
+                if not no_features:
                     centroid, corners = get_centroid_and_corners(camera_data)
                     print("Centroid: ", centroid)
                     if (centroid is None) or (corners is None): # if no controid or corners found, prepare to displace
                         print("No centroid or corners found")
                         no_features = True
-                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.1, deviation=0.0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
+                        deviation = 0.0
+                        if gates_found == 2:
+                            deviation = 0.2 # If searching for third gate, y displacement will be 0 if no deviation set -> set some to have good sight of gate
+                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.25, deviation=deviation, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
                         print("Setting displacement goal after no centroid or corners were found: ", displacement_goal)
 
                 # If no features found (orthogonal alignment with gate or very narrow contour) do :
-                if no_features == True :
+                if no_features :
                     # If at displacement goal, stop displacement maneuver
                     if (displacement_goal[0] - POS_MARGIN < sensor_data['x_global'] < displacement_goal[0] + POS_MARGIN) and \
                        (displacement_goal[1] - POS_MARGIN < sensor_data['y_global'] < displacement_goal[1] + POS_MARGIN) :
@@ -226,15 +233,15 @@ def get_command(sensor_data, camera_data, dt):
                     CENTROID_YAW_PID.reset()    # Anti-windup reset                     
                     aligned = True
 
-                    deviation = displacement(displacement_goal, sensor_data['yaw'], move_radius=0.4, deviation=0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
-                    if not ((deviation[0] - POS_MARGIN < sensor_data['x_global'] < deviation[0] + POS_MARGIN) and \
-                            (deviation[1] - POS_MARGIN < sensor_data['y_global'] < deviation[1] + POS_MARGIN)) and (not deviated) :
+                    if not ((displacement_goal[0] - POS_MARGIN < sensor_data['x_global'] < displacement_goal[0] + POS_MARGIN) and \
+                            (displacement_goal[1] - POS_MARGIN < sensor_data['y_global'] < displacement_goal[1] + POS_MARGIN)) and (not deviated) :
                         print("Deviating")
-                        control_command = deviation
+                        control_command = displacement_goal
                         return control_command
                     deviated = True
 
                 # Save corners and centroid image vectors and camera positions in inertial frame
+                current_image_corners = corners.copy()
                 for t in range(N_CORNERS): # Triangulate the 4 corners
                     corner = tuple(corners[t, :])
                     r, p = triangulation_preprocess(corner, sensor_data)
@@ -242,9 +249,23 @@ def get_command(sensor_data, camera_data, dt):
                     p_q_vectors[:, t, images_taken] = p
 
                 r, p = triangulation_preprocess(centroid, sensor_data)
-                displacement_goal = p
                 r_s_vectors[:, -1, images_taken] = r
                 p_q_vectors[:, -1, images_taken] = p
+
+                # Compute slope of the top corners to displace in the right direction
+                slope = compute_corner_slope(current_image_corners) 
+                if slope == 1:
+                    body_x = 0.28
+                    body_y = 0.28
+                    body_z = 0
+                elif slope == -1:
+                    body_x = 0.28
+                    body_y = -0.28
+                    body_z = 0
+                R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
+                displacement_goal = R_b2i @ np.array([body_x, body_y, body_z]) + np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+                displacement_goal = np.append(displacement_goal, sensor_data['yaw'])
+                print("Second position: ", displacement_goal)
 
                 images_taken += 1
                 print("Image ", images_taken, " taken")
@@ -252,11 +273,13 @@ def get_command(sensor_data, camera_data, dt):
             # Triangulate the 4 corners
             for t in range(N_CORNERS): 
                 corner_position = triangulation(t)
+                corner_position = np.clip(corner_position, 0.1, 8.0) # Clip the position to avoid inconsistent values
                 print("Corner", t, " position: ", corner_position)
                 GATES_DATA[f"GATE{gates_found+1}"]["corners"].append(corner_position)
             
             # Triangulate the centroid
             gate_position = triangulation(-1)
+            gate_position = np.clip(gate_position, 0.1, 8.0) # Clip the position to avoid inconsistent values
             print("Gate position: ", gate_position)
             GATES_DATA[f"GATE{gates_found+1}"]["centroid"] = gate_position
 
@@ -271,6 +294,8 @@ def get_command(sensor_data, camera_data, dt):
             normal = plane_normal(GATES_DATA[f"GATE{gates_found+1}"]["corners"])
             centroid = GATES_DATA[f"GATE{gates_found+1}"]["centroid"]
             np1, np2 = normal_points(normal, centroid)
+            np1 = np.clip(np1, 0.1, 8.0) # Clip the positions to avoid inconsistent values
+            np2 = np.clip(np2, 0.1, 8.0) 
             GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np1)
             GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np2)
             print("Normal points: ", GATES_DATA[f"GATE{gates_found+1}"]["normal points"])
@@ -313,7 +338,7 @@ def get_command(sensor_data, camera_data, dt):
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                 return control_command
             else :
-                visualize_gates(GATES_DATA) # to erase for assignment
+                # visualize_gates(GATES_DATA) # to erase for assignment
                 MANEUVER["Go to gate"] = 0
                 MANEUVER["Start race"] = 1
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
@@ -353,10 +378,28 @@ def get_command(sensor_data, camera_data, dt):
 
             best_wp_order, best_wp_indices, min_cost = sort_wp_min_energy(wp)
             print("Best waypoint order: ", best_wp_indices, "\nCost: ", min_cost)
-            
-            best_path = best_wp_order
+
+            best_wp_order_with_centroids = []
+            # Add in the waypoints order the centrois of the gate between each pair of normal points of that gate
+            for i in range(0, len(best_wp_indices), 2):
+                idx1 = best_wp_indices[i]
+
+                # Append first normal point
+                best_wp_order_with_centroids.append(best_wp_order[i])
+
+                # Identify which gate this pair belongs to
+                gate_num = idx1 // 2  # Because two normal points per gate (0,1 → gate 0; 2,3 → gate 1)
+
+                # Append the centroid of that gate
+                centroid = GATES_DATA[f"GATE{gate_num+1}"]["centroid"]
+                best_wp_order_with_centroids.append(centroid)
+
+                # Append second normal point
+                best_wp_order_with_centroids.append(best_wp_order[i+1])
+                
+            best_path = best_wp_order_with_centroids
             best_path.insert(0, [X_START, Y_START, Z_START])  # Add start position
-            best_path.extend(best_wp_order)                   # Add points for a second lap
+            best_path.extend(best_wp_order_with_centroids)    # Add points for a second lap
             best_path.extend([[X_START, Y_START, Z_START]])   # Add final position
 
             race_waypoints = best_path
@@ -386,9 +429,15 @@ def get_command(sensor_data, camera_data, dt):
         # Update race timer
         race_time += dt
 
+        final_target = race_trajectory_setpoints[-1][:3]  # Extract [x, y, z] of last setpoint
+        current_pos = np.array([
+            sensor_data['x_global'],
+            sensor_data['y_global'],
+            sensor_data['z_global']
+        ])
         # End race if finished
-        if race_time >= race_times[-1]:
-            print("Race finished! Time taken :", race_time)
+        if (np.linalg.norm(final_target - current_pos) < POS_MARGIN) and (race_time + 5 > T_FINAL):
+            print("Race finished! Time taken:", race_time)
             return [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
         
         # Choose current setpoint
@@ -396,7 +445,7 @@ def get_command(sensor_data, camera_data, dt):
             idx = np.searchsorted(race_time_setpoints, race_time)
             idx = min(idx, len(race_trajectory_setpoints)-1)
             target = race_trajectory_setpoints[idx]  # [x, y, z, yaw]
-            
+
             control_command = [float(target[0]), float(target[1]), float(target[2]), float(target[3])]
             return control_command
       
@@ -500,7 +549,6 @@ def compute_centroid(contour):
 
 def compute_corners(contour):
     # Approximate contour to polygon
-    # Approximate contour to polygon
     perim = cv2.arcLength(contour, True)
     for factor in np.linspace(0.001, 0.1, 100):
         eps = factor * perim
@@ -533,6 +581,69 @@ def sort_corners(corners):
 
     return np.array([top_left, top_right, bottom_right, bottom_left])
 
+import numpy as np
+
+def compute_corner_slope(corners):
+    """
+    Given an array of 4 corner points (x,y) from sorted,
+    find the two topmost and two bottommost corners, order them left to right, and compute sign of their slopes.
+
+    Args:
+      corners: (4,2) array-like of pixel coords [(x0,y0),...,(x3,y3)] in image coordinates.
+
+    Returns:
+      sign of slope = sign((y_right_top - y_left_top) / (x_right_top - x_left_top) + (y_right_bottom - y_left_bottom) / (x_right_bottom - x_left_bottom))
+    """
+    pts = np.asarray(corners)
+
+    # Top two corners (smallest y)
+    top2_idx = np.argsort(pts[:,1])[:2]
+    top2 = pts[top2_idx]
+    left_top, right_top = top2[np.argsort(top2[:,0])]
+    dx_top = right_top[0] - left_top[0]
+    dy_top = right_top[1] - left_top[1]
+    if dx_top == 0:
+        slope_top = 0
+    else :
+        slope_top = dy_top / dx_top
+    print('Slope top : ', slope_top)
+
+    # Bottom two corners (largest y)
+    bottom2_idx = np.argsort(pts[:,1])[-2:]
+    bottom2 = pts[bottom2_idx]
+    left_bot, right_bot = bottom2[np.argsort(bottom2[:,0])]
+    dx_bot = right_bot[0] - left_bot[0]
+    dy_bot = right_bot[1] - left_bot[1]
+    if dx_bot == 0:
+        slope_bot = 0
+    else :
+        slope_bot = dy_bot / dx_bot
+    print('Slope bot : ', slope_bot)
+    
+    slope = slope_top + slope_bot
+    print("Slope: ", np.sign(slope))
+
+    if slope >= 0:
+        return 1
+    elif slope < 0:
+        return -1
+
+def quaternion2rotmat(quaternion):      
+    """
+    Compute the rotation matrix from a quaternion
+
+    Inputs:
+                quaternion: A list of 4 numbers [x, y, z, w] that represents the quaternion
+    Outputs:
+                R: A 3x3 numpy array that represents the rotation matrix of the quaternion
+    """
+    R = np.eye(3)
+    x, y, z, w = quaternion
+    R = np.array([[1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+                [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
+                [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]])
+    return R
+
 def triangulation_preprocess(pixel, sensor_data):
     """""
     Triangulation preprocess function to compute the image vector and camera position in inertial frame
@@ -541,13 +652,14 @@ def triangulation_preprocess(pixel, sensor_data):
             pixel: Pixel coordinates in the image, tuple of 2 numbers (x, y)
             sensor_data: Position of the drone in inertial frame, np array [x, y, z]
     Outputs:
-            pixel: A list of 3 numbers [x, y, 1] that represents the pixel coordinates in homogeneous coordinates
+            r: image vector in inertial frame ndarray of shape (3,)
+            position: camera position in inertial frame ndarray of shape (3,) 
     """
 
-    v_vector = (np.array([pixel[0], pixel[1], FOCAL_LENGTH]))    # image vector in camera frame             
+    v_vector = np.array([pixel[0], pixel[1], FOCAL_LENGTH])      # image vector in camera frame             
     R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']]) 
     R_c2i = R_b2i @ R_C2B
-    r = R_c2i @ v_vector              # image vector in inertial frame
+    r = R_c2i @ v_vector                                         # image vector in inertial frame
 
     cam_offset_body = np.array([X_CAM, Y_CAM, Z_CAM])            # camera offset in body frame
     cam_offset_inertial = R_b2i @ cam_offset_body                # camera offset in inertial frame
@@ -574,22 +686,6 @@ def triangulation(t):
     g = q + mu * s
     position = (f + g) / 2
     return position
-
-def quaternion2rotmat(quaternion):      
-    """
-    Compute the rotation matrix from a quaternion
-
-    Inputs:
-                quaternion: A list of 4 numbers [x, y, z, w] that represents the quaternion
-    Outputs:
-                R: A 3x3 numpy array that represents the rotation matrix of the quaternion
-    """
-    R = np.eye(3)
-    x, y, z, w = quaternion
-    R = np.array([[1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-                [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
-                [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]])
-    return R
 
 def plane_normal(corners):
     """
@@ -627,17 +723,21 @@ def normal_points(normal, centroid):
     np2 = centroid - DISTANCE_FROM_GATE * normal
     return np1, np2
 
-def displacement(initial_position, yaw, move_radius = 0.5, deviation = 0.2, in_yaw_direction = 1):
-        # Inputs:
-        #          initial_position: position [x, y, z] in inertial frame
-        #          yaw: yaw angle in radians
-        #          move_radius: radius of the circle to move around the initial position
-        #          deviation: additional deviation to add to the displacement vector, randomly generated between -deviation and deviation
-        # Outputs:
-        #          command: output command [x, y, z, yaw] to be sent to drone
+def displacement(initial_position, yaw, move_radius = 0.5, deviation = 0, in_yaw_direction = 1):
+    """
+    Compute the displacement vector to move around the initial position in a circle.
+        Inputs:
+                 initial_position: position [x, y, z] in inertial frame
+                 yaw: yaw angle in radians
+                 move_radius: radius of the circle to move around the initial position
+                 deviation: additional deviation to add to the displacement vector
+                 in_yaw_direction: 1 to move in the yaw direction, 0 to move in x direction only
+        Outputs:
+                 command: output command [x, y, z, yaw] to be sent to drone
+    """
 
-    goal_x = initial_position[0] + move_radius * np.cos(yaw*in_yaw_direction) + deviation * (2*np.random.rand() - 1) # slightly displace from the current x position 
-    goal_y = initial_position[1] + move_radius * np.sin(yaw*in_yaw_direction) + deviation * (2*np.random.rand() - 1) # slightly displace from the current y position 
+    goal_x = initial_position[0] + move_radius * np.cos(yaw*in_yaw_direction) + deviation  # slightly displace from the current x position 
+    goal_y = initial_position[1] + move_radius * np.sin(yaw*in_yaw_direction) + deviation  # slightly displace from the current y position 
     command = [goal_x, goal_y, initial_position[2], yaw] 
     return command
 

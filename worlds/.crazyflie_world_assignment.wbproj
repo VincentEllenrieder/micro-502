@@ -8,4 +8,4 @@ orthographicViewHeight: 1
 textFiles: -1
 consoles: Console:All:All
 renderingDevicePerspectives: crazyflie:camera;0;0.0987654;0;0
-renderingDevicePerspectives: crazyflie:cf_camera;1;1.33;0;0.000875657
+renderingDevicePerspectives: crazyflie:cf_camera;1;1.74667;0;0.000875657
