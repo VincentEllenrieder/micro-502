@@ -3,7 +3,8 @@ import time
 import cv2
 from lib.simple_pid import PID  # Assuming your PID class is here
 import matplotlib.pyplot as plt # to erase for assignment
-
+from mpl_toolkits.mplot3d import Axes3D # to erase for assignment
+import numpy as np
 
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
@@ -45,6 +46,20 @@ MANEUVER = {
     # --- Finish ---
     "Finish": 0
 }
+
+# Gates data
+GATES_DATA = {
+    f"GATE{i+1}": {
+        "centroid": None,                                               # Triangulated centroid position, ndarray of shape (3,)
+        "corners": [],                                                  # Triangulated corner positions, list of 4 ndarrays of shape (3,)
+        "normal points": []                                             # Normal points on each side of the gate, list of 2 ndarrays of shape (3,)
+    }
+    for i in range(5)
+}
+gates_found = 0
+GATE_Z_CORRECTION = 0.1                                                # Drone goes up when going through the gate due to path planning and destination goal being a few centimeters after the gate for margin
+N_CORNERS = 4                                                          # Number of corners to detect in the image
+DISTANCE_FROM_GATE = 0.3                                               # Distance of the normal point from the centroid when going through a gate
 
 # Camera parameters
 FOCAL_LENGTH = 161.013922282    # Focal length of the camera in pixels
@@ -103,23 +118,20 @@ ALIGNMENT_MARGIN = 15                                                   # Margin
 CENTROID_YAW_PID = PID(Kp=0.005, Ki=0.0003, Kd=0.001, output_limits=(-np.pi/20, np.pi/20))   # PID controller for centroid alignment
 CENTROID_YAW_PID.setpoint = 0                                           # Alignment in Y should be at center of image     
 R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotation matrix from camera frame to body frame 
-no_centroid = False                                                     # Flag to check if no centroid was found in the image  
+no_features = False                                                     # Flag to check if no centroid was found in the image  
 aligned = False                                                         # Flag to check if drone has aligned with gate centroid
 deviated = False                                                        # Flag to check if drone has deviated for second image     
-r_s_vectors = np.zeros((3, N_IMAGES))                                   # Centroid image vectors in inertial frame  
-p_q_vectors = np.zeros((3, N_IMAGES))                                   # Camera positions in inertial frame  
-
-# Gates data
-gates_found = 0
-gates = []
-GATE_Z_CORRECTION = 0.1                                                # drone goes up when going through the gate due to path planning and destination goal being a few centimeters after the gate for margin
+r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                     # Image vectors in inertial frame of the 4 corners + centroid of the current gate taken in images 1 and 2
+p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Camera positions in inertial frame when 4 corners + centroid of the current gate were taken in images 1 and 2 
 
 # General purpose registers
-displacement_goal = [0, 0, 0]   # Saved current displacement goal
+displacement_goal = np.zeros(3)   # Saved current displacement goal
+
+# ----------------- Main function -----------------
 
 def get_command(sensor_data, camera_data, dt):
     
-    global MANEUVER, images_taken, gates_found, gates, aligned, deviated, r_s_vectors, p_q_vectors, displacement_goal, no_centroid
+    global MANEUVER, images_taken, gates_found, gates, no_features, aligned, deviated, displacement_goal, r_s_vectors, p_q_vectors, GATES_DATA
 
     # Drone has not taken off
     if MANEUVER["Started"] == 0 :
@@ -166,27 +178,27 @@ def get_command(sensor_data, camera_data, dt):
             
             while images_taken < N_IMAGES:
                 
-                if no_centroid == False:
-                    centroid = get_centroid(camera_data)
+                if no_features == False:
+                    centroid, corners = get_centroid_and_corners(camera_data)
                     print("Centroid: ", centroid)
-                    if centroid == None: # if no controid found, prepare to displace
-                        print("No centroid found")
-                        no_centroid = True
-                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.3, deviation=0.0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
-                        print("Setting displacement goal after no centroid was found: ", displacement_goal)
+                    if (centroid is None) or (corners is None): # if no controid or corners found, prepare to displace
+                        print("No centroid or corners found")
+                        no_features = True
+                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.1, deviation=0.0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
+                        print("Setting displacement goal after no centroid or corners were found: ", displacement_goal)
 
-                # If no centroid found (orthogonal alignment with gate or very narrow contour) do :
-                if no_centroid == True :
+                # If no features found (orthogonal alignment with gate or very narrow contour) do :
+                if no_features == True :
                     # If at displacement goal, stop displacement maneuver
                     if (displacement_goal[0] - POS_MARGIN < sensor_data['x_global'] < displacement_goal[0] + POS_MARGIN) and \
                        (displacement_goal[1] - POS_MARGIN < sensor_data['y_global'] < displacement_goal[1] + POS_MARGIN) :
-                        print("At displacement goal after no centroid was found")
-                        no_centroid = False
+                        print("At displacement goal after no centroid or corners were found")
+                        no_features = False
                         control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                         return control_command
                     # If not at displacement goal, displace
                     else :
-                        print("Moving to displacement goal after no centroid was found")
+                        print("Moving to displacement goal after no centroid or corners were found")
                         control_command = displacement_goal
                         return control_command
                 
@@ -203,7 +215,7 @@ def get_command(sensor_data, camera_data, dt):
                     CENTROID_YAW_PID.reset()    # Anti-windup reset                     
                     aligned = True
 
-                    deviation = displacement(p_q_vectors[:, 0], sensor_data['yaw'], move_radius=0.2, deviation=0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
+                    deviation = displacement(displacement_goal, sensor_data['yaw'], move_radius=0.4, deviation=0, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
                     if not ((deviation[0] - POS_MARGIN < sensor_data['x_global'] < deviation[0] + POS_MARGIN) and \
                             (deviation[1] - POS_MARGIN < sensor_data['y_global'] < deviation[1] + POS_MARGIN)) and (not deviated) :
                         print("Deviating")
@@ -211,43 +223,37 @@ def get_command(sensor_data, camera_data, dt):
                         return control_command
                     deviated = True
 
-                v_vector = (np.array([centroid[0], centroid[1], FOCAL_LENGTH]))                
-                R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']]) 
-                R_c2i = R_b2i @ R_C2B
-                r_s_vectors[:, images_taken] = R_c2i @ v_vector # Rotate the camera vector to the inertial frame
+                # Save corners and centroid image vectors and camera positions in inertial frame
+                for t in range(N_CORNERS): # Triangulate the 4 corners
+                    corner = tuple(corners[t, :])
+                    r, p = triangulation_preprocess(corner, sensor_data)
+                    r_s_vectors[:, t, images_taken] = r
+                    p_q_vectors[:, t, images_taken] = p
 
-                cam_offset_body = np.array([X_CAM, Y_CAM, Z_CAM])
-                cam_offset_inertial = R_b2i @ cam_offset_body
-                position = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) + cam_offset_inertial # Position of the camera in the inertial frame
-                p_q_vectors[:, images_taken] = position 
-                print('Camera position : ', position)
-            
+                r, p = triangulation_preprocess(centroid, sensor_data)
+                displacement_goal = p
+                r_s_vectors[:, -1, images_taken] = r
+                p_q_vectors[:, -1, images_taken] = p
+
                 images_taken += 1
                 print("Image ", images_taken, " taken")
-        
 
-            r = r_s_vectors[:, 0]
-            s = r_s_vectors[:, 1]
-            p = p_q_vectors[:, 0]
-            q = p_q_vectors[:, 1]
-            A = np.array([[np.dot(r, r), -np.dot(r, s)],
-                          [np.dot(s, r), -np.dot(s, s)]])
-            b = np.array([np.dot((q - p), r), np.dot((q - p), s)])
-            sol = np.linalg.solve(A,b)
-            lambda_ = sol[0]
-            mu = sol[1]
-            print("Line coefficients: ", lambda_, mu)
-            f = p + lambda_ * r
-            g = q + mu * s
-            gate_position = (f + g) / 2
+            # Triangulate the 4 corners
+            for t in range(N_CORNERS): 
+                corner_position = triangulation(t)
+                print("Corner", t, " position: ", corner_position)
+                GATES_DATA[f"GATE{gates_found+1}"]["corners"].append(corner_position)
+            
+            # Triangulate the centroid
+            gate_position = triangulation(-1)
             print("Gate position: ", gate_position)
-            gates.append(gate_position) 
+            GATES_DATA[f"GATE{gates_found+1}"]["centroid"] = gate_position
 
             deviated = False
             aligned = False
             images_taken = 0
-            r_s_vectors = np.zeros((3, N_IMAGES))                                   
-            p_q_vectors = np.zeros((3, N_IMAGES))                                   
+            r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                                   
+            p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                                   
             MANEUVER["Vision"] = 0
             MANEUVER["Search next gate"] = 0
             MANEUVER["Go to gate"] = 1
@@ -257,7 +263,7 @@ def get_command(sensor_data, camera_data, dt):
     elif MANEUVER["Go to gate"] == 1:
         print('in Go to gate', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
         
-        goal = displacement([gates[gates_found][0], gates[gates_found][1], gates[gates_found][2] - GATE_Z_CORRECTION], sensor_data['yaw'], move_radius=0.75, deviation=0) # Displace until slightly after gate position to go through the gate
+        goal = displacement([GATES_DATA[f"GATE{gates_found+1}"]["centroid"][0], GATES_DATA[f"GATE{gates_found+1}"]["centroid"][1], GATES_DATA[f"GATE{gates_found+1}"]["centroid"][2] - GATE_Z_CORRECTION], sensor_data['yaw'], move_radius=0.75, deviation=0) # Displace until slightly after gate position to go through the gate
         print("Goal: ", goal)
         if (goal[0] - POS_MARGIN < sensor_data['x_global'] < goal[0] + POS_MARGIN) and \
            (goal[1] - POS_MARGIN < sensor_data['y_global'] < goal[1] + POS_MARGIN) and \
@@ -272,10 +278,9 @@ def get_command(sensor_data, camera_data, dt):
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                 return control_command
             else :
+                visualize_gates(GATES_DATA) # to erase for assignment
                 MANEUVER["Go to gate"] = 0
                 MANEUVER["Start race"] = 1
-                print("Gates found : \n", len(gates), gates)            
-                raise Exception('testing code')            
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                 return control_command
         else:
@@ -300,13 +305,14 @@ def get_command(sensor_data, camera_data, dt):
 
     elif MANEUVER['Race'] == 1:
         print('in Race', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
-        
+
 
     else:   
         print('in else')
         control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
         return control_command
       
+# ----------------- Helper functions -----------------
 
 def image_processing(camera_data):
     img = cv2.cvtColor(camera_data, cv2.COLOR_BGRA2RGB) # convert BGRA to RGB
@@ -317,63 +323,85 @@ def image_processing(camera_data):
                 (img[:, :, 2] > RED_BLUE_THRESHOLD_LOW) & (img[:, :, 2] < RED_BLUE_THRESHOLD_HIGH) & \
                 (img[:, :, 1] < GREEN_THRESHOLD)
     img_filtered[condition] = 255
-    plt.imsave('image_analysis/thresholding image.png', img_filtered[:, :], cmap='gray')
+    plt.imsave('image_analysis/thresholding_image.png', img_filtered[:, :], cmap='gray')
     return img_filtered
 
-def get_centroid(camera_data):
+def get_centroid_and_corners(camera_data):
     image_filtered = image_processing(camera_data)
-    image_contours = np.zeros((*np.shape(image_filtered), 3), dtype=np.uint8) 
+    image_features = np.zeros((*np.shape(image_filtered), 3), dtype=np.uint8) 
     contours, _ = cv2.findContours(image_filtered, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE) # Find contours in the image
     #print('contours \n :', contours, ', len :', len(contours), ', shape :', np.shape(contours), ', type :', type(contours)) 
     
     # If sight orthogonal to gate's normal vector (no countours), signal to displace 
     if len(contours) == 0:
         print("No contours found")
-        return None
+        return None, None
     
     # If one contour found, directly compute its centroid
     elif len(contours) == 1:
         contour = contours[0]
 
-        cv2.drawContours(image_contours, [contour], 0, (0, 255, 0), 1)
-        plt.imsave('image_analysis/gate_single_contour.png' + str(images_taken+1) + '.png', image_contours[:, :, :])          
+        cv2.drawContours(image_features, [contour], 0, (0, 255, 0), 1)
+        plt.imsave('image_analysis/gate_single_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
 
-        result = compute_centroid(contour)      
-        if result == None:
-            return None
-        cX, cY = result                                
-        centroid = cX - 150, cY - 150       # Shift centroid to center of image
+        result_centroid = compute_centroid(contour)      
+        if result_centroid is None:
+            return None, None
+        cX = result_centroid[0]
+        cY = result_centroid[1]
+        centroid = cX - 150, cY - 150                   # Shift centroid coordinates wrt to center of image
 
-        image_contours[cY, cX, 0] = 255     # Set the centroid pixel to red
-        plt.imsave('image_analysis/gate_center_single_contour_image' + str(images_taken+1) + '.png', image_contours[:, :, :])
+        result_corners = compute_corners(contour)
+        if result_corners is None:
+            return None, None
+        corners = sort_corners(result_corners) - 150    # Sort corners in order and shift coordinates wrt to center of image
+        
+        image_features[cY, cX, 0] = 255                 # Set the centroid pixel to red
+        for p, (x, y) in enumerate(corners):            # Set corners in shades of blue
+            xi, yi = int(x), int(y)
+            #color_coeff = p % len(corners)     
+            image_features[yi + 150, xi + 150, 2] = 255
+        plt.imsave('image_analysis/gate_features_single_contour_image' + str(images_taken+1) + '.png', image_features[:, :, :])
 
-        return centroid                                                           
+        return centroid, corners                                                           
 
     # If multiple contours found, only take the one with rightmost centroid
     elif len(contours) > 1:
 
-        cv2.drawContours(image_contours, contours, -1, (0, 255, 0), 1)
-        plt.imsave('image_analysis/gate_multiple_contour.png' + str(images_taken+1) + '.png', image_contours[:, :, :])          
+        cv2.drawContours(image_features, contours, -1, (0, 255, 0), 1)
+        plt.imsave('image_analysis/gate_multiple_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
 
         rightmost = 0
+        contour_chosen = None
         cX, cY = 0, 0
         for contour in contours:
-            result = compute_centroid(contour)
-            if result == None:
-                return None
-            x, y = result
+            result_centroid = compute_centroid(contour)
+            if result_centroid is None:
+                return None, None
+            x, y = result_centroid
             if x > rightmost:
-                rightmost = x                   # Take the rightmost centroid
-                centroid = x - 150, y - 150     # Shift centroid to center of image
+                rightmost = x                           # Take the rightmost centroid
+                cX, cY = x - 150, y - 150               # Shift centroid to center of image
+                centroid = cX, cY
+                contour_chosen = contour
+                
+        result_corners = compute_corners(contour_chosen)
+        if result_corners is None:
+            return None, None
+        corners = sort_corners(result_corners) - 150    # Sort corners in order and shift coordinates wrt to center of image
 
-        image_contours[cY, cX, 0] = 255         # Set the centroid pixel to red
-        plt.imsave('image_analysis/gate_center_multiple_contours' + str(images_taken+1) + '.png', image_contours[:, :, :])
+        image_features[cY, cX, 0] = 255                 # Set the centroid pixel to red
+        for p, (x, y) in enumerate(corners):            # Set corners in shades of blue
+            xi, yi = int(x), int(y)
+            #color_coeff = p % len(corners)     
+            image_features[yi + 150, xi + 150, 2] = 255
+        plt.imsave('image_analysis/gate_features_multiple_contours' + str(images_taken+1) + '.png', image_features[:, :, :])
 
-        return centroid
+        return centroid, corners
 
-def compute_centroid(contours):
+def compute_centroid(contour):
     # Compute the centroid of the given contour
-    M = cv2.moments(contours)
+    M = cv2.moments(contour)
     if M["m00"] != 0:
         cX = int(M["m10"] / M["m00"])
         cY = int(M["m01"] / M["m00"])
@@ -382,18 +410,136 @@ def compute_centroid(contours):
         print("Error computing centroid")
         return None
 
-def quaternion2rotmat(quaternion):      
-        # Inputs:
-        #           quaternion: A list of 4 numbers [x, y, z, w] that represents the quaternion
-        # Outputs:
-        #           R: A 3x3 numpy array that represents the rotation matrix of the quaternion
+def compute_corners(contour):
+    # Approximate contour to polygon
+    # Approximate contour to polygon
+    perim = cv2.arcLength(contour, True)
+    for factor in np.linspace(0.001, 0.1, 100):
+        eps = factor * perim
+        corners = cv2.approxPolyDP(contour, eps, True).reshape(-1, 2)
+        if len(corners) == 4:
+            return corners
+    print("Contour does not have 4 corners")
+    return None
 
-        R = np.eye(3)
-        x, y, z, w = quaternion
-        R = np.array([[1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-                    [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
-                    [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]])
-        return R
+def sort_corners(corners):
+    """
+    Sort the corners in a specific order: top-left, top-right, bottom-right, bottom-left
+
+    Inputs: 
+                (4, 2) np array of corner points
+    Outputs: 
+                (4, 2) np array of sorted corner points
+    """
+
+    x_sorted = corners[np.argsort(corners[:, 0]), :]    # Sort by increasing x
+
+    left = x_sorted[:2, :]                              # Two leftmost points
+    right = x_sorted[2:, :]                             # Two rightmost points
+
+    left = left[np.argsort(left[:, 1]), :]              # Among left points, sort by y to get top-left and bottom-left
+    top_left, bottom_left = left                    
+
+    right = right[np.argsort(right[:, 1]), :]           # Among right points, sort by y to get top-left and bottom-left
+    top_right, bottom_right = right
+
+    return np.array([top_left, top_right, bottom_right, bottom_left])
+
+def triangulation_preprocess(pixel, sensor_data):
+    """""
+    Triangulation preprocess function to compute the image vector and camera position in inertial frame
+
+    Inputs:
+            pixel: Pixel coordinates in the image, tuple of 2 numbers (x, y)
+            sensor_data: Position of the drone in inertial frame, np array [x, y, z]
+    Outputs:
+            pixel: A list of 3 numbers [x, y, 1] that represents the pixel coordinates in homogeneous coordinates
+    """
+
+    v_vector = (np.array([pixel[0], pixel[1], FOCAL_LENGTH]))    # image vector in camera frame             
+    R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']]) 
+    R_c2i = R_b2i @ R_C2B
+    r = R_c2i @ v_vector              # image vector in inertial frame
+
+    cam_offset_body = np.array([X_CAM, Y_CAM, Z_CAM])            # camera offset in body frame
+    cam_offset_inertial = R_b2i @ cam_offset_body                # camera offset in inertial frame
+    position = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) + cam_offset_inertial # Position of the camera in the inertial frame
+    print('Camera position : ', position)
+    return r, position
+
+def triangulation(t):
+    """
+    Triangulation function to compute the position of the corners and centroid of the gate in inertial frame
+
+    """
+    r = r_s_vectors[:, t, 0]
+    s = r_s_vectors[:, t, 1]
+    p = p_q_vectors[:, t, 0]
+    q = p_q_vectors[:, t, 1]
+    A = np.array([[np.dot(r, r), -np.dot(r, s)],
+                [np.dot(s, r), -np.dot(s, s)]])
+    b = np.array([np.dot((q - p), r), np.dot((q - p), s)])
+    sol = np.linalg.solve(A,b)
+    lambda_ = sol[0]
+    mu = sol[1]
+    f = p + lambda_ * r
+    g = q + mu * s
+    position = (f + g) / 2
+    print(type(position))
+    return position
+
+def quaternion2rotmat(quaternion):      
+    """
+    Compute the rotation matrix from a quaternion
+
+    Inputs:
+                quaternion: A list of 4 numbers [x, y, z, w] that represents the quaternion
+    Outputs:
+                R: A 3x3 numpy array that represents the rotation matrix of the quaternion
+    """
+    R = np.eye(3)
+    x, y, z, w = quaternion
+    R = np.array([[1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+                [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
+                [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]])
+    return R
+
+def plane_normal(corners):
+    """
+    Compute the unit normal of the plane defined by 4 corners.
+
+    Inputs :
+                corners : list of four ndarrays of shape (3,).
+
+    Outputs :
+                n : ndarray, shape (3,) Unit normal vector (direction arbitrary up to sign).
+    """
+    # Pick p0, p1, p2
+    p0, p2, p3 = corners[0], corners[2], corners[3] # top left, bottom right, bottom left corners
+    # Form two edge vectors
+    v1 = p2 - p3
+    v2 = p0 - p3
+    # Cross product = normal (not yet unit)
+    n = np.cross(v1, v2)
+    norm = np.linalg.norm(n)
+    return n / norm
+
+def normal_points(normal, centroid):
+    """
+    Compute the normal points to go through when passing the gate.
+
+    Inputs:
+                normal: unit normal vector of the plane defined by the 4 corners. This vector positive sign is always in the halfspace (delimited by gate plane) of the drone.
+                centroid: centroid of the gate in inertial frame
+
+    Outputs:
+                np1: first normal point in inertial frame
+                np2: second normal point in inertial frame
+    """
+    # TODO : Determine which side of the gate to go through first depending on the placement of the gate in the map
+    np1 = centroid + DISTANCE_FROM_GATE * normal
+    np2 = centroid - DISTANCE_FROM_GATE * normal
+    return np1, np2
 
 def displacement(initial_position, yaw, move_radius = 0.5, deviation = 0.2, in_yaw_direction = 1):
         # Inputs:
@@ -408,3 +554,49 @@ def displacement(initial_position, yaw, move_radius = 0.5, deviation = 0.2, in_y
     goal_y = initial_position[1] + move_radius * np.sin(yaw*in_yaw_direction) + deviation * (2*np.random.rand() - 1) # slightly displace from the current y position 
     command = [goal_x, goal_y, initial_position[2], yaw] 
     return command
+
+def visualize_gates(GATES_DATA):
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot map plane
+    # Map is 8x8m, origin at (0,0,0) lower right, x to left, y upward
+    # We'll draw the square
+    xx = [0, 8, 8, 0, 0]
+    yy = [0, 0, 8, 8, 0]
+    zz = [0]*5
+    ax.plot(xx, yy, zz, color='gray', linestyle='--')
+
+    # Plot gate features
+    for key, data in GATES_DATA.items():
+        centroid = data['centroid']
+        corners = data['corners']
+        normal_pts = data['normal points']
+
+        # Plot centroid
+        if centroid is not None:
+            ax.scatter(*centroid, color='magenta', s=50, label=f"{key} centroid")
+
+        # Plot corners
+        for corner in corners:
+            ax.scatter(*corner, color='blue', s=20)
+
+        # Plot normal points
+        for np_pt in normal_pts:
+            ax.scatter(*np_pt, color='green', s=20)
+
+    # Labels and legend
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_xlim(0, 8)
+    ax.set_ylim(0, 8)
+    # Z limits based on data; assuming gates ~1m high
+    ax.set_zlim(0, 2)
+
+    # Avoid duplicate legend entries
+    handles, labels = ax.get_legend_handles_labels()
+    unique = dict(zip(labels, handles))
+    ax.legend(unique.values(), unique.keys())
+
+    plt.show()
