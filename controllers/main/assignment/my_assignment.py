@@ -1,10 +1,10 @@
 import numpy as np
 import time
 import cv2
-from lib.simple_pid import PID  # Assuming your PID class is here
+from lib.simple_pid import PID
 import matplotlib.pyplot as plt # to erase for assignment
 from mpl_toolkits.mplot3d import Axes3D # to erase for assignment
-import numpy as np
+from itertools import permutations, product
 
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
@@ -42,24 +42,22 @@ MANEUVER = {
     "Go to gate" : 0,
     # --- Race ---
     "Start race" : 0,
-    "Race" : 0,
-    # --- Finish ---
-    "Finish": 0
+    "Race" : 0
 }
 
 # Gates data
+N_GATES = 5                                                              # Number of gates in the map 
 GATES_DATA = {
     f"GATE{i+1}": {
         "centroid": None,                                               # Triangulated centroid position, ndarray of shape (3,)
         "corners": [],                                                  # Triangulated corner positions, list of 4 ndarrays of shape (3,)
         "normal points": []                                             # Normal points on each side of the gate, list of 2 ndarrays of shape (3,)
     }
-    for i in range(5)
+    for i in range(N_GATES)
 }
 gates_found = 0
-GATE_Z_CORRECTION = 0.1                                                # Drone goes up when going through the gate due to path planning and destination goal being a few centimeters after the gate for margin
 N_CORNERS = 4                                                          # Number of corners to detect in the image
-DISTANCE_FROM_GATE = 0.3                                               # Distance of the normal point from the centroid when going through a gate
+DISTANCE_FROM_GATE = 0.5                                               # Distance of the normal point from the centroid when going through a gate
 
 # Camera parameters
 FOCAL_LENGTH = 161.013922282    # Focal length of the camera in pixels
@@ -121,8 +119,19 @@ R_C2B = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])                   # Rotati
 no_features = False                                                     # Flag to check if no centroid was found in the image  
 aligned = False                                                         # Flag to check if drone has aligned with gate centroid
 deviated = False                                                        # Flag to check if drone has deviated for second image     
-r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                     # Image vectors in inertial frame of the 4 corners + centroid of the current gate taken in images 1 and 2
+r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Image vectors in inertial frame of the 4 corners + centroid of the current gate taken in images 1 and 2
 p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Camera positions in inertial frame when 4 corners + centroid of the current gate were taken in images 1 and 2 
+
+# Move to gate parameters
+reached_normalpt1 = False                                               # Flag to check if the first normal point of the gate has been reached
+reached_normalpt2 = False                                               # Flag to check if the second normal point of the gate has been reached
+
+# Racing parameters
+VEL_LIM = 7.0                                                           # Velocity limit in m/s
+ACC_LIM = 50.0                                                          # Acceleration limit in m/s^2
+DISC_STEPS = 20                                                         # Number of discrete steps per segment for the trajectory planning
+T_FINAL = 20                                                            # Time to finish both racing laps in seconds
+ANGLE_PENALTY = 1.0                                                     # Penalty for path choice with high turning angles
 
 # General purpose registers
 displacement_goal = np.zeros(3)   # Saved current displacement goal
@@ -131,7 +140,9 @@ displacement_goal = np.zeros(3)   # Saved current displacement goal
 
 def get_command(sensor_data, camera_data, dt):
     
-    global MANEUVER, images_taken, gates_found, gates, no_features, aligned, deviated, displacement_goal, r_s_vectors, p_q_vectors, GATES_DATA
+    global MANEUVER, images_taken, gates_found, no_features, aligned, deviated, displacement_goal, \
+                    r_s_vectors, p_q_vectors, GATES_DATA, reached_normalpt1, reached_normalpt2, \
+                    race_waypoints, race_indices, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
 
     # Drone has not taken off
     if MANEUVER["Started"] == 0 :
@@ -249,11 +260,22 @@ def get_command(sensor_data, camera_data, dt):
             print("Gate position: ", gate_position)
             GATES_DATA[f"GATE{gates_found+1}"]["centroid"] = gate_position
 
+            # Reset flags and registers for next gate
             deviated = False
             aligned = False
             images_taken = 0
             r_s_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                                   
-            p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                                   
+            p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))   
+
+            # Compute the normal points to go through the gate
+            normal = plane_normal(GATES_DATA[f"GATE{gates_found+1}"]["corners"])
+            centroid = GATES_DATA[f"GATE{gates_found+1}"]["centroid"]
+            np1, np2 = normal_points(normal, centroid)
+            GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np1)
+            GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np2)
+            print("Normal points: ", GATES_DATA[f"GATE{gates_found+1}"]["normal points"])
+
+            # Prepare to go to the gate found
             MANEUVER["Vision"] = 0
             MANEUVER["Search next gate"] = 0
             MANEUVER["Go to gate"] = 1
@@ -263,15 +285,28 @@ def get_command(sensor_data, camera_data, dt):
     elif MANEUVER["Go to gate"] == 1:
         print('in Go to gate', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
         
-        goal = displacement([GATES_DATA[f"GATE{gates_found+1}"]["centroid"][0], GATES_DATA[f"GATE{gates_found+1}"]["centroid"][1], GATES_DATA[f"GATE{gates_found+1}"]["centroid"][2] - GATE_Z_CORRECTION], sensor_data['yaw'], move_radius=0.75, deviation=0) # Displace until slightly after gate position to go through the gate
-        print("Goal: ", goal)
-        if (goal[0] - POS_MARGIN < sensor_data['x_global'] < goal[0] + POS_MARGIN) and \
-           (goal[1] - POS_MARGIN < sensor_data['y_global'] < goal[1] + POS_MARGIN) and \
-           (goal[2] - POS_MARGIN < sensor_data['z_global'] < goal[2] + POS_MARGIN) and \
-           (goal[3] - YAW_MARGIN < sensor_data['yaw'] < goal[3] + YAW_MARGIN) :
-            print("At gate position")
+        # If drone hasn't reached the first normal point yet, go to it
+        if not reached_normalpt1:
+            x_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][0]
+            y_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][1]
+            z_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][2]
+            goal = displacement([x_goal, y_goal, z_goal], sensor_data['yaw'], move_radius=0, deviation=0) 
+            print("Point 1 goal: ", goal)
+
+        # If drone has reached the first normal point but not the second, go to the second normal point
+        elif (reached_normalpt1) and (not reached_normalpt2):
+            x_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][0]
+            y_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][1]
+            z_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][2]
+            goal = displacement([x_goal, y_goal, z_goal], sensor_data['yaw'], move_radius=0, deviation=0)
+            print("Point 2 goal: ", goal)
+
+        # If the drone went to both points, it crossed the gate -> prepare for next step
+        else :
+            reached_normalpt1 = False
+            reached_normalpt2 = False
             gates_found += 1
-            if gates_found < 5:
+            if gates_found < N_GATES:
                 MANEUVER["Go to gate"] = 0
                 MANEUVER["Search next gate"] = 1
                 MANEUVER["Go to scan"] = 1
@@ -281,6 +316,21 @@ def get_command(sensor_data, camera_data, dt):
                 visualize_gates(GATES_DATA) # to erase for assignment
                 MANEUVER["Go to gate"] = 0
                 MANEUVER["Start race"] = 1
+                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                return control_command
+
+        if (goal[0] - POS_MARGIN < sensor_data['x_global'] < goal[0] + POS_MARGIN) and \
+           (goal[1] - POS_MARGIN < sensor_data['y_global'] < goal[1] + POS_MARGIN) and \
+           (goal[2] - POS_MARGIN < sensor_data['z_global'] < goal[2] + POS_MARGIN) and \
+           (goal[3] - YAW_MARGIN < sensor_data['yaw'] < goal[3] + YAW_MARGIN) :
+            if not reached_normalpt1:
+                print("At normal point 1")
+                reached_normalpt1 = True
+                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                return control_command
+            elif (reached_normalpt1) and (not reached_normalpt2):
+                print("At normal point 2")
+                reached_normalpt2 = True
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                 return control_command
         else:
@@ -294,6 +344,33 @@ def get_command(sensor_data, camera_data, dt):
            (Y_START - POS_MARGIN < sensor_data['y_global'] < Y_START + POS_MARGIN) and \
            (Z_START - POS_MARGIN < sensor_data['z_global'] < Z_START + POS_MARGIN) :
             print("At start position")
+            
+            # Initialize the order of the waypoints used for racing and each segment time
+            wp = []
+            for i in range(N_GATES):  # Assuming 5 gates
+                np1, np2 = GATES_DATA[f"GATE{i+1}"]["normal points"]
+                wp.extend([np1, np2])  # flat list of 10 points (np.array)
+
+            best_wp_order, best_wp_indices, min_cost = sort_wp_min_energy(wp)
+            print("Best waypoint order: ", best_wp_indices, "\nCost: ", min_cost)
+            
+            best_path = best_wp_order
+            best_path.insert(0, [X_START, Y_START, Z_START])  # Add start position
+            best_path.extend(best_wp_order)                   # Add points for a second lap
+            best_path.extend([[X_START, Y_START, Z_START]])   # Add final position
+
+            race_waypoints = best_path
+            race_indices = best_wp_indices
+
+            segment_times = init_params(race_waypoints)
+            race_times = np.concatenate(([0], np.cumsum(segment_times)))
+
+            # Compute polynomial coefficients and extract trajectory setpoints (sampled points)
+            race_poly_coeffs = compute_poly_coefficients(race_waypoints, race_times)
+            race_trajectory_setpoints, race_time_setpoints  = poly_setpoint_extraction(race_poly_coeffs, race_times)
+
+            # Prepare for racing
+            race_time = 0.0
             MANEUVER['Start race'] = 0
             MANEUVER['Race'] = 1
             control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
@@ -306,13 +383,24 @@ def get_command(sensor_data, camera_data, dt):
     elif MANEUVER['Race'] == 1:
         print('in Race', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
 
+        # Update race timer
+        race_time += dt
 
-    else:   
-        print('in else')
-        control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
-        return control_command
+        # End race if finished
+        if race_time >= race_times[-1]:
+            print("Race finished! Time taken :", race_time)
+            return [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+        
+        # Choose current setpoint
+        else:
+            idx = np.searchsorted(race_time_setpoints, race_time)
+            idx = min(idx, len(race_trajectory_setpoints)-1)
+            target = race_trajectory_setpoints[idx]  # [x, y, z, yaw]
+            
+            control_command = [float(target[0]), float(target[1]), float(target[2]), float(target[3])]
+            return control_command
       
-# ----------------- Helper functions -----------------
+# ----------------- Helper functions for first vision based lap -----------------
 
 def image_processing(camera_data):
     img = cv2.cvtColor(camera_data, cv2.COLOR_BGRA2RGB) # convert BGRA to RGB
@@ -485,7 +573,6 @@ def triangulation(t):
     f = p + lambda_ * r
     g = q + mu * s
     position = (f + g) / 2
-    print(type(position))
     return position
 
 def quaternion2rotmat(quaternion):      
@@ -509,10 +596,10 @@ def plane_normal(corners):
     Compute the unit normal of the plane defined by 4 corners.
 
     Inputs :
-                corners : list of four ndarrays of shape (3,).
+                corners : Corners of the gate, list of four ndarrays of shape (3,).
 
     Outputs :
-                n : ndarray, shape (3,) Unit normal vector (direction arbitrary up to sign).
+                n : Unit normal vector pointing in the halfspace of the drone, ndarray of shape (3,).
     """
     # Pick p0, p1, p2
     p0, p2, p3 = corners[0], corners[2], corners[3] # top left, bottom right, bottom left corners
@@ -536,7 +623,6 @@ def normal_points(normal, centroid):
                 np1: first normal point in inertial frame
                 np2: second normal point in inertial frame
     """
-    # TODO : Determine which side of the gate to go through first depending on the placement of the gate in the map
     np1 = centroid + DISTANCE_FROM_GATE * normal
     np2 = centroid - DISTANCE_FROM_GATE * normal
     return np1, np2
@@ -600,3 +686,238 @@ def visualize_gates(GATES_DATA):
     ax.legend(unique.values(), unique.keys())
 
     plt.show()
+
+# ----------------- Helper functions for second and third racing laps -----------------
+
+def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
+    """
+    Finds the most energy-efficient order to visit a series of gates, where:
+    - Each gate has 2 normal points (entry/exit) that must be consecutive, but can flip.
+    - The order of gates can be permuted.
+    - The path starts at either normal point 1 or 2 (1st gate)
+    - Energy = distance + angle penalties (to avoid sharp turns).
+    
+    Args:
+        wp (list): Waypoints. List of 5 tuples, 1 (np.array(entry), np.array(exit)) for each gate.
+        angle_penalty_weight (float): Weight applied to angle penalties relative to distance.
+
+    Returns:
+        best_path (list): List of np.array waypointspoints representing the optimal path.
+        best_indices (list): List of indices (int) representing the updated order of waypoints.
+        min_cost (float): Total energy cost (distance + angle penalties).
+    """
+
+    num_gates = len(wp) // 2  # Number of gates
+    gate_indices = [ (2*i, 2*i+1) for i in range(num_gates) ]  # Gate groupings
+
+    best_path = None
+    best_indices = None
+    min_cost = float('inf')
+
+    for gate_order in permutations(gate_indices):
+        for flip_config in product([False, True], repeat=num_gates):
+            path = []
+            indices = []
+            for i, gate in enumerate(gate_order):
+                idx1, idx2 = gate
+                if flip_config[i]:
+                    path.extend([wp[idx2], wp[idx1]])      # Flip order
+                    indices.extend([idx2, idx1])
+                else:
+                    path.extend([wp[idx1], wp[idx2]])      # Normal order
+                    indices.extend([idx1, idx2])
+
+            # Ensure starting point is waypoint 0 or 1 (Gate 1's normal points)
+            if indices[0] not in [0, 1]:
+                continue
+
+            # Compute distance + angle penalties
+            dist = sum(np.linalg.norm(path[i+1] - path[i]) for i in range(len(path)-1))
+            angle_penalty = 0
+            for i in range(1, len(path)-1):
+                vec1 = path[i] - path[i-1]
+                vec2 = path[i+1] - path[i]
+                if np.linalg.norm(vec1) > 1e-6 and np.linalg.norm(vec2) > 1e-6:
+                    cos_theta = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+                    angle_penalty += (1 - cos_theta)
+
+            cost = dist + angle_penalty_weight * angle_penalty
+
+            if cost < min_cost:
+                min_cost = cost
+                best_path = path
+                best_indices = indices
+
+    return best_path, best_indices, min_cost
+
+def init_params(path_waypoints, t_f=T_FINAL):
+    """
+    Compute timing and limits for m-waypoint path.
+    Inputs:
+      - path_waypoints: list of m (x,y,z) tuples
+      - t_f           : total time to traverse path [s]
+    Returns:
+      times      : 1 x m numpy array of time that each segment needs to be completed with
+    """
+    m = len(path_waypoints)
+    segment_lengths = np.array([
+        np.linalg.norm(np.array(path_waypoints[i+1]) - np.array(path_waypoints[i]))
+        for i in range(m-1)
+    ])
+    total_length = np.sum(segment_lengths)
+
+    # Segment times are proportional to their lengths
+    segment_times = (segment_lengths / total_length) * t_f
+
+    return segment_times
+
+def compute_poly_matrix(t):
+    """
+    Build the 5x6 constraint matrix A_m(t) for a 5-constraint, 5th-order polynomial:
+      [ pos; vel; acc; jerk; snap ] = A_m(t) @ [c5,c4,c3,c2,c1,c0]^T
+    """
+    return np.array([
+        [  t**5,    t**4,   t**3,   t**2, t, 1],   # pos
+        [5*t**4, 4*t**3, 3*t**2, 2*t,   1, 0],   # vel
+        [20*t**3,12*t**2, 6*t,    2,     0, 0],   # acc
+        [60*t**2,24*t,    6,      0,     0, 0],   # jerk
+        [120*t,   24,     0,      0,     0, 0],   # snap
+    ])
+
+def compute_poly_coefficients(path_waypoints, times):
+    """
+    Solve for the minimum-jerk poly coefficients of each segment.
+    Inputs:
+      - path_waypoints: list of m (x,y,z) tuples
+      - times         : 1xm array of waypoint times
+    Returns:
+      poly_coeffs: (6*(m-1))x3 array, stacking [c5...c0] vertically for each segment & horizontally for each dim
+    """
+    seg_times = np.diff(times)
+    m = len(path_waypoints)
+    n_segs = m - 1
+
+    poly_coeffs = np.zeros((6*n_segs, 3))
+
+    for dim in range(3):                                    # Compute for x, y, and z separately
+        A = np.zeros((6*(n_segs), 6*(n_segs)))
+        b = np.zeros(6*(n_segs))
+        pos = np.array([p[dim] for p in path_waypoints])
+        A_0 = compute_poly_matrix(0)                        # A_0 gives the constraint factor matrix A_m for any segment at t=0, this is valid for the starting conditions at every path segment
+
+        row = 0
+        for i in range(n_segs):
+            pos_0, pos_f = pos[i], pos[i+1]                 #Starting and final positions of the segment
+            v_0 = a_0 = v_f = a_f = 0                       # The prescribed zero velocity (v) and acceleration (a) values at the start and goal position of the entire path
+            A_f = compute_poly_matrix(seg_times[i])         # A_f gives the constraint factor matrix A_m for a segment i at its relative end time t=seg_times[i]
+            if i == 0:                                      # First path segment
+                # start pos, end pos, start vel, start acc
+                A[row, i*6:(i+1)*6] = A_0[0]                #Initial position constraint
+                b[row] = pos_0
+                row += 1
+                A[row, i*6:(i+1)*6] = A_f[0]                #Final position constraint
+                b[row] = pos_f
+                row += 1
+                A[row, i*6:(i+1)*6] = A_0[1]                #Initial velocity constraint
+                b[row] = v_0
+                row += 1
+                A[row, i*6:(i+1)*6] = A_0[2]                #Initial acceleration constraint
+                b[row] = a_0
+                row += 1
+                # continuity vel/acc/jerk/snap between seg 0 & 1
+                A[row:row+4, i*6:(i+1)*6] = A_f[1:]
+                A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
+                b[row:row+4] = np.zeros(4)
+                row += 4
+            elif i < m-2:                                   # Intermediate path segments
+                # intermediate: pos start/end + continuity
+                A[row, i*6:(i+1)*6] = A_0[0]                #Initial position constraint
+                b[row] = pos_0
+                row += 1
+                A[row, i*6:(i+1)*6] = A_f[0]                #Final position constraint
+                b[row] = pos_f
+                row += 1
+                # continuity of velocity, acceleration, jerk and snap
+                A[row:row+4, i*6:(i+1)*6] = A_f[1:]
+                A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
+                b[row:row+4] = np.zeros(4)
+                row += 4
+            elif i == m-2:                                  #Final path segment
+                # start pos, end pos, end vel, end acc
+                A[row, i*6:(i+1)*6] = A_0[0]                #Initial position constraint
+                b[row] = pos_0
+                row += 1
+                A[row, i*6:(i+1)*6] = A_f[0]                #Final position constraint
+                b[row] = pos_f
+                row += 1
+                A[row, i*6:(i+1)*6] = A_f[1]                #Final velocity constraint
+                b[row] = v_f
+                row += 1
+                A[row, i*6:(i+1)*6] = A_f[2]                #Final acceleration constraint
+                b[row] = a_f
+                row += 1
+
+        # Solve for the polynomial coefficients for the dimension dim
+        poly_coeffs[:,dim] = np.linalg.solve(A, b)   
+
+    return poly_coeffs
+
+def poly_setpoint_extraction(poly_coeffs, times):
+    """
+    From poly_coeffs and times, sample position, vel, accel at fine intervals.
+    Also asserts speed/accel ≤ limits.
+    Inputs:
+      - poly_coeffs: (6*(m-1))x3 output of compute_poly_coefficients
+      - times       : 1xm array
+      - disc_steps  : samples per waypoint interval
+      - vel_lim     : max speed
+      - acc_lim     : max accel
+      - tol         : small epsilon
+    Returns:
+      trajectory_setpoints : (Nx4) [x,y,z,yaw]
+      time_setpoints       : (N,) sample times
+    """
+    m = len(times)
+    total_samples = DISC_STEPS * m
+    time_setpoints = np.linspace(times[0], times[-1], total_samples)
+
+    x_vals = np.zeros((total_samples,1))
+    y_vals = np.zeros((total_samples,1))
+    z_vals = np.zeros((total_samples,1))
+    v_vals = np.zeros((total_samples,1))
+    a_vals = np.zeros((total_samples,1))
+
+    coeffs_x = poly_coeffs[:,0]
+    coeffs_y = poly_coeffs[:,1]
+    coeffs_z = poly_coeffs[:,2]
+
+    for i,t in enumerate(time_setpoints):
+        # which segment
+        idx = min(max(np.searchsorted(times, t)-1, 0), m-2)
+        t_rel = t - times[idx]
+        A = compute_poly_matrix(t_rel)
+
+        x  = A[0] @ coeffs_x[idx*6:(idx+1)*6]
+        y  = A[0] @ coeffs_y[idx*6:(idx+1)*6]
+        z  = A[0] @ coeffs_z[idx*6:(idx+1)*6]
+        vx = A[1] @ coeffs_x[idx*6:(idx+1)*6]
+        vy = A[1] @ coeffs_y[idx*6:(idx+1)*6]
+        vz = A[1] @ coeffs_z[idx*6:(idx+1)*6]
+        ax = A[2] @ coeffs_x[idx*6:(idx+1)*6]
+        ay = A[2] @ coeffs_y[idx*6:(idx+1)*6]
+        az = A[2] @ coeffs_z[idx*6:(idx+1)*6]
+
+        x_vals[i] = x
+        y_vals[i] = y
+        z_vals[i] = z
+        v_vals[i] = np.linalg.norm([vx,vy,vz])
+        a_vals[i] = np.linalg.norm([ax,ay,az])
+
+    # check limits
+    assert np.max(v_vals) <= VEL_LIM, "V_max exceeded"
+    assert np.max(a_vals) <= ACC_LIM, "A_max exceeded"
+
+    yaw_vals = np.zeros((total_samples,1))
+    trajectory_setpoints = np.hstack([x_vals, y_vals, z_vals, yaw_vals])
+
+    return trajectory_setpoints, time_setpoints
