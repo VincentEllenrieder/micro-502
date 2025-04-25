@@ -14,14 +14,13 @@ import lib.mapping_and_planning_examples as mapping_and_planning_examples
 import time, random
 import threading
 import cv2 as cv
-import matplotlib.pyplot as plt     # to DELETE for assignment
 
 exp_num = 4                         # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
 control_style = 'path_planner'      # 'keyboard' or 'path_planner'
-SEED = 34                           # (to erase for assignment) tricky seeds : 33, 34 
+SEED = 32                           # (to erase for assignment) tricky seeds : 33, 34 
 np.random.seed(SEED)
 random.seed(SEED)
-rand_env = True                    # Randomise the environment
+rand_env = False                    # Randomise the environment
 
 
 # Global variables for handling threads
@@ -727,11 +726,7 @@ if __name__ == '__main__':
 
                         # Read the camera feed
                         camera_data = drone.read_camera()
-                         
-                        # # Show camera using openCV DELETE for assignment
-                        # cv.imshow("Camera Feed", camera_data)
-                        # cv.waitKey(1)
-                        
+                                                 
                         # Update the sensor data in the thread
                         with sensor_lock:
                             latest_sensor_data = sensor_data

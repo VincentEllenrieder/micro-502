@@ -134,7 +134,7 @@ reached_normalpt2 = False                                               # Flag t
 VEL_LIM = 7.0                                                           # Velocity limit in m/s
 ACC_LIM = 50.0                                                          # Acceleration limit in m/s^2
 DISC_STEPS = 20                                                         # Number of discrete steps per segment for the trajectory planning
-T_FINAL = 30                                                            # Time to finish both racing laps in seconds
+T_FINAL = 20                                                            # Time to finish both racing laps in seconds
 ANGLE_PENALTY = 1.0                                                     # Penalty for path choice with high turning angles
 
 # General purpose registers
@@ -317,7 +317,7 @@ def get_command(sensor_data, camera_data, dt):
             z_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][2]
             goal = displacement([x_goal, y_goal, z_goal], sensor_data['yaw'], move_radius=0, deviation=0) 
             print("Point 1 goal: ", goal)
-
+            
         # If drone has reached the first normal point but not the second, go to the second normal point
         elif (reached_normalpt1) and (not reached_normalpt2):
             x_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][0]
@@ -580,8 +580,6 @@ def sort_corners(corners):
     top_right, bottom_right = right
 
     return np.array([top_left, top_right, bottom_right, bottom_left])
-
-import numpy as np
 
 def compute_corner_slope(corners):
     """
