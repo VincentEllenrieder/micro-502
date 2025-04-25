@@ -46,7 +46,7 @@ MANEUVER = {
 }
 
 # Gates data
-N_GATES = 5                                                              # Number of gates in the map 
+N_GATES = 5                                                             # Number of gates in the map 
 GATES_DATA = {
     f"GATE{i+1}": {
         "centroid": None,                                               # Triangulated centroid position, ndarray of shape (3,)
@@ -55,7 +55,8 @@ GATES_DATA = {
     }
     for i in range(N_GATES)
 }
-gates_found = 0
+n_gates_searched = 0                                                     # Number of gates searched for     
+gates_found = []                                                       # List of gates found, each entry is the index of the gate, from 1 to N_GATES 
 N_CORNERS = 4                                                          # Number of corners to detect in the image
 DISTANCE_FROM_GATE = 0.5                                               # Distance of the normal point from the centroid when going through a gate
 
@@ -119,6 +120,10 @@ no_features = False                                                     # Flag t
 aligned = False                                                         # Flag to check if drone has aligned with gate centroid
 deviated = False                                                        # Flag to check if drone has deviated for second image
 current_image_corners = None                                            # Current image corners of the gate
+n_deviations_done = 0                                                   # Number of deviations done when displacing due to no features
+MAX_DEVIATIONS = 5                                                      # Maximum number of deviations allowed when searching for features
+n_search_tries = 0                                                      # Number of tries to find or pass the gate 
+MAX_SEARCH_TRIES = 3                                                    # Maximum number of tries to find or pass the gate
 
 
 # Triangulation parameters
@@ -128,13 +133,16 @@ p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))                      # Camera
 
 # Move to gate parameters
 reached_normalpt1 = False                                               # Flag to check if the first normal point of the gate has been reached
+reached_centroid = False                                                # Flag to check if the centroid of the gate has been reached
 reached_normalpt2 = False                                               # Flag to check if the second normal point of the gate has been reached
+CROSSING_THRESHOLD = 0.25                                               # Threshold to consider the gate crossed (ratio of pink pixels in image)
+current_gate_found = False                                              # Flag to check if the gate being searched has been found or not
 
 # Racing parameters
 VEL_LIM = 7.0                                                           # Velocity limit in m/s
 ACC_LIM = 50.0                                                          # Acceleration limit in m/s^2
 DISC_STEPS = 20                                                         # Number of discrete steps per segment for the trajectory planning
-T_FINAL = 20                                                            # Time to finish both racing laps in seconds
+T_FINAL = 30                                                            # Time to finish both racing laps in seconds
 ANGLE_PENALTY = 1.0                                                     # Penalty for path choice with high turning angles
 
 # General purpose registers
@@ -144,9 +152,9 @@ displacement_goal = np.zeros(3)   # Saved current displacement goal
 
 def get_command(sensor_data, camera_data, dt):
     
-    global MANEUVER, images_taken, gates_found, no_features, aligned, deviated, displacement_goal, current_image_corners, \
-                    r_s_vectors, p_q_vectors, GATES_DATA, reached_normalpt1, reached_normalpt2, \
-                    race_waypoints, race_indices, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
+    global MANEUVER, images_taken, n_gates_searched, no_features, aligned, deviated, displacement_goal, current_image_corners, n_deviations_done, n_search_tries, \
+                    r_s_vectors, p_q_vectors, GATES_DATA, reached_normalpt1, reached_centroid, reached_normalpt2, current_gate_found, \
+                    race_waypoints, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
 
     # Drone has not taken off
     if MANEUVER["Started"] == 0 :
@@ -169,7 +177,7 @@ def get_command(sensor_data, camera_data, dt):
         
         if MANEUVER["Go to scan"] == 1:
             print('in Go to scan')
-            scan_location = SCAN_LOCATIONS["SCAN" + str(gates_found + 1)] # Get the next scan location
+            scan_location = SCAN_LOCATIONS["SCAN" + str(n_gates_searched + 1)] # Get the next scan location
 
             # If at scan location, go to next step
             if (scan_location["SCAN_X"] - POS_MARGIN < sensor_data['x_global'] < scan_location["SCAN_X"] + POS_MARGIN) and \
@@ -193,18 +201,46 @@ def get_command(sensor_data, camera_data, dt):
             
             while images_taken < N_IMAGES:
                 
+                # If latest status does not mention that no features were found, check if new centroid has been found
                 if not no_features:
                     centroid, corners = get_centroid_and_corners(camera_data)
                     print("Centroid: ", centroid)
-                    if (centroid is None) or (corners is None): # if no controid or corners found, prepare to displace
-                        print("No centroid or corners found")
-                        no_features = True
-                        deviation = 0.0
-                        if gates_found == 2:
-                            deviation = 0.2 # If searching for third gate, y displacement will be 0 if no deviation set -> set some to have good sight of gate
-                        displacement_goal = displacement([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']], sensor_data['yaw'], move_radius=0.25, deviation=deviation, in_yaw_direction=0) # Displace in direction of yaw when aligned to centroid
-                        print("Setting displacement goal after no centroid or corners were found: ", displacement_goal)
 
+                    # If no features found (orthogonal alignment with gate or very narrow contour) set displacement goal to be in diagonal of current drone orientation, so that aligned gate becomes visible:
+                    if (centroid is None) or (corners is None):
+                        print("No centroid or corners found")
+                        if n_deviations_done < MAX_DEVIATIONS:
+                            no_features = True
+                            body_x = 0.1
+                            body_y = 0.1
+                            body_z = 0
+                            R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
+                            displacement_goal = R_b2i @ np.array([body_x, body_y, body_z]) + np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+                            displacement_goal = np.append(displacement_goal, sensor_data['yaw'])
+                            print("Setting displacement goal after no centroid or corners were found: ", displacement_goal)
+                        
+                        # If too many deviations go to initial scanning position and try a new search attempt
+                        else :
+                            if n_search_tries < MAX_SEARCH_TRIES:
+                                print("No gate features found after 5 tries, trying again...")
+                                MANEUVER["Vision"] = 0
+                                MANEUVER["Go to scan"] = 1
+                                n_deviations_done = 0
+                                n_search_tries += 1
+                                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                                return control_command
+
+                            # If too many search attempts, abandon and go to next gate
+                            else :
+                                print("No gate found after 3 tries, moving to next gate")
+                                MANEUVER["Vision"] = 0
+                                MANEUVER["Go to scan"] = 1
+                                n_deviations_done = 0
+                                n_search_tries = 0
+                                n_gates_searched += 1
+                                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                                return control_command
+                        
                 # If no features found (orthogonal alignment with gate or very narrow contour) do :
                 if no_features :
                     # If at displacement goal, stop displacement maneuver
@@ -212,6 +248,7 @@ def get_command(sensor_data, camera_data, dt):
                        (displacement_goal[1] - POS_MARGIN < sensor_data['y_global'] < displacement_goal[1] + POS_MARGIN) :
                         print("At displacement goal after no centroid or corners were found")
                         no_features = False
+                        n_deviations_done += 1
                         control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                         return control_command
                     # If not at displacement goal, displace
@@ -268,6 +305,8 @@ def get_command(sensor_data, camera_data, dt):
                 print("Second position: ", displacement_goal)
 
                 images_taken += 1
+                n_deviations_done = 0
+                n_search_tries = 0
                 print("Image ", images_taken, " taken")
 
             # Triangulate the 4 corners
@@ -275,13 +314,13 @@ def get_command(sensor_data, camera_data, dt):
                 corner_position = triangulation(t)
                 corner_position = np.clip(corner_position, 0.1, 8.0) # Clip the position to avoid inconsistent values
                 print("Corner", t, " position: ", corner_position)
-                GATES_DATA[f"GATE{gates_found+1}"]["corners"].append(corner_position)
+                GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"].append(corner_position)
             
             # Triangulate the centroid
             gate_position = triangulation(-1)
             gate_position = np.clip(gate_position, 0.1, 8.0) # Clip the position to avoid inconsistent values
             print("Gate position: ", gate_position)
-            GATES_DATA[f"GATE{gates_found+1}"]["centroid"] = gate_position
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = gate_position
 
             # Reset flags and registers for next gate
             deviated = False
@@ -291,14 +330,14 @@ def get_command(sensor_data, camera_data, dt):
             p_q_vectors = np.zeros((3, N_CORNERS+1, N_IMAGES))   
 
             # Compute the normal points to go through the gate
-            normal = plane_normal(GATES_DATA[f"GATE{gates_found+1}"]["corners"])
-            centroid = GATES_DATA[f"GATE{gates_found+1}"]["centroid"]
+            normal = plane_normal(GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"])
+            centroid = GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"]
             np1, np2 = normal_points(normal, centroid)
             np1 = np.clip(np1, 0.1, 8.0) # Clip the positions to avoid inconsistent values
             np2 = np.clip(np2, 0.1, 8.0) 
-            GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np1)
-            GATES_DATA[f"GATE{gates_found+1}"]["normal points"].append(np2)
-            print("Normal points: ", GATES_DATA[f"GATE{gates_found+1}"]["normal points"])
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"].append(np1)
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"].append(np2)
+            print("Normal points: ", GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"])
 
             # Prepare to go to the gate found
             MANEUVER["Vision"] = 0
@@ -310,39 +349,97 @@ def get_command(sensor_data, camera_data, dt):
     elif MANEUVER["Go to gate"] == 1:
         print('in Go to gate', sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw'])
         
-        # If drone hasn't reached the first normal point yet, go to it
+        # If drone hasn't reached the first normal point yet, go to it and look in direction of the centroid
         if not reached_normalpt1:
-            x_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][0]
-            y_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][1]
-            z_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][0][2]
-            goal = displacement([x_goal, y_goal, z_goal], sensor_data['yaw'], move_radius=0, deviation=0) 
-            print("Point 1 goal: ", goal)
-            
-        # If drone has reached the first normal point but not the second, go to the second normal point
-        elif (reached_normalpt1) and (not reached_normalpt2):
-            x_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][0]
-            y_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][1]
-            z_goal = GATES_DATA[f"GATE{gates_found+1}"]["normal points"][1][2]
-            goal = displacement([x_goal, y_goal, z_goal], sensor_data['yaw'], move_radius=0, deviation=0)
-            print("Point 2 goal: ", goal)
+            x_goal, y_goal, z_goal = GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"][0]
+            x_centroid = GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"][0]
+            y_centroid = GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"][1]
+            dx = x_centroid - sensor_data['x_global']
+            dy = y_centroid - sensor_data['y_global']
+            desired_yaw = np.arctan2(dy, dx) 
+            goal = displacement([x_goal, y_goal, z_goal], desired_yaw, move_radius=0, deviation=0)
+            print("Normal point 1 goal: ", goal)
 
-        # If the drone went to both points, it crossed the gate -> prepare for next step
+        # If drone has reached the first normal point but not the centroid, go to the centroid and look in direction of the centroid
+        elif (reached_normalpt1) and (not reached_centroid):
+            x_goal, y_goal, z_goal = GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"]
+            dx = x_goal - sensor_data['x_global']
+            dy = y_goal - sensor_data['y_global']
+            desired_yaw = np.arctan2(dy, dx) 
+            goal = displacement([x_goal, y_goal, z_goal], desired_yaw, move_radius=0, deviation=0)
+            print("Centroid goal: ", goal)
+
+            mask = image_processing(camera_data)
+            pink_ratio = np.count_nonzero(mask) / np.size(mask)
+            print("Pink ratio: ", pink_ratio)
+            if (pink_ratio >= CROSSING_THRESHOLD) and not current_gate_found:
+                current_gate_found = True
+                print("Gate has just been crossed")
+
+        # If drone has reached the first normal point and the centroid but not the second normal point, go to it and look in direction of the second point
+        elif (reached_normalpt1) and (reached_centroid) and (not reached_normalpt2):
+            x_goal, y_goal, z_goal = GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"][1]
+            dx = x_goal - sensor_data['x_global']
+            dy = y_goal - sensor_data['y_global']
+            desired_yaw = np.arctan2(dy, dx) 
+            goal = displacement([x_goal, y_goal, z_goal], desired_yaw, move_radius=0, deviation=0)
+            print("Normal point 2 goal: ", goal)
+
+        # If the drone went to all points, check if the current gate being searched was found.
         else :
             reached_normalpt1 = False
+            reached_centroid = False
             reached_normalpt2 = False
-            gates_found += 1
-            if gates_found < N_GATES:
-                MANEUVER["Go to gate"] = 0
-                MANEUVER["Search next gate"] = 1
-                MANEUVER["Go to scan"] = 1
-                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
-                return control_command
+
+            # If the current gate being searched was found, do :
+            if current_gate_found:
+                n_gates_searched += 1
+                gates_found.append(n_gates_searched) # Append the gate number to the list of gates found
+                current_gate_found = False
+
+                # If the number of gates that have been searched is less than the total number of gates, go to the next gate
+                if n_gates_searched < N_GATES:
+                    print("Gate found, moving to next gate")
+                    MANEUVER["Go to gate"] = 0
+                    MANEUVER["Search next gate"] = 1
+                    MANEUVER["Go to scan"] = 1
+                    control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                    return control_command
+                
+                # If all gates have been searched, go to the race start state
+                else :
+                    # visualize_gates(GATES_DATA) # to erase for assignment
+                    MANEUVER["Go to gate"] = 0
+                    MANEUVER["Start race"] = 1
+                    control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                    return control_command
+                
+            # If the current gate was not actually crossed after all, do : 
             else :
-                # visualize_gates(GATES_DATA) # to erase for assignment
-                MANEUVER["Go to gate"] = 0
-                MANEUVER["Start race"] = 1
-                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
-                return control_command
+                GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the faulty gate data
+                GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
+                GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
+
+                # If the number of attempts to find the gate is less than the maximum, go back to the scan location and try again
+                if n_search_tries < MAX_SEARCH_TRIES:
+                    print("Gate not crossed, trying again...")
+                    n_search_tries += 1
+                    MANEUVER["Go to gate"] = 0
+                    MANEUVER["Search next gate"] = 1
+                    MANEUVER["Go to scan"] = 1
+                    control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                    return control_command
+                
+                # If the maximum number of attempts to find the gate has been reached, go to the next scan location and abandon the current gate
+                else :
+                    print("Gate not crossed after multiple attempts, going to next scan location")
+                    n_search_tries = 0
+                    n_gates_searched += 1
+                    MANEUVER["Go to gate"] = 0
+                    MANEUVER["Search next gate"] = 1
+                    MANEUVER["Go to scan"] = 1
+                    control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                    return control_command
 
         if (goal[0] - POS_MARGIN < sensor_data['x_global'] < goal[0] + POS_MARGIN) and \
            (goal[1] - POS_MARGIN < sensor_data['y_global'] < goal[1] + POS_MARGIN) and \
@@ -353,7 +450,12 @@ def get_command(sensor_data, camera_data, dt):
                 reached_normalpt1 = True
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
                 return control_command
-            elif (reached_normalpt1) and (not reached_normalpt2):
+            elif (reached_normalpt1) and (not reached_centroid):
+                print("At centroid")
+                reached_centroid = True
+                control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+                return control_command
+            elif (reached_centroid) and (reached_centroid) and (not reached_normalpt2):
                 print("At normal point 2")
                 reached_normalpt2 = True
                 control_command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
@@ -369,33 +471,36 @@ def get_command(sensor_data, camera_data, dt):
            (Y_START - POS_MARGIN < sensor_data['y_global'] < Y_START + POS_MARGIN) and \
            (Z_START - POS_MARGIN < sensor_data['z_global'] < Z_START + POS_MARGIN) :
             print("At start position")
-            
-            # Initialize the order of the waypoints used for racing and each segment time
-            wp = []
-            for i in range(N_GATES):  # Assuming 5 gates
-                np1, np2 = GATES_DATA[f"GATE{i+1}"]["normal points"]
-                wp.extend([np1, np2])  # flat list of 10 points (np.array)
 
-            best_wp_order, best_wp_indices, min_cost = sort_wp_min_energy(wp)
-            print("Best waypoint order: ", best_wp_indices, "\nCost: ", min_cost)
+            wp = []
+            gate_ids = []
+            gate_to_idx = {}
+            best_wp_gate_ids = []
+            # Initialize the order of the waypoints used for racing and each segment time
+            for i, gate_id in enumerate(gates_found):
+                print(GATES_DATA[f"GATE{gate_id}"]["normal points"])
+                np1, np2 = GATES_DATA[f"GATE{gate_id}"]["normal points"]
+                idx1 = 2*i
+                idx2 = 2*i + 1
+                wp.extend([np1, np2])
+                gate_ids.extend([gate_id, gate_id])
+                gate_to_idx[gate_id] = (idx1, idx2)
+
+                best_wp_order, best_wp_indices, best_wp_gate_ids, min_cost = sort_wp_min_energy(wp, gate_ids, gate_to_idx)
+                print("Best waypoint order: ", best_wp_indices, "\nCost: ", min_cost)
 
             best_wp_order_with_centroids = []
-            # Add in the waypoints order the centrois of the gate between each pair of normal points of that gate
-            for i in range(0, len(best_wp_indices), 2):
-                idx1 = best_wp_indices[i]
+            for i in range(0, len(best_wp_order), 2):
+                np1 = best_wp_order[i]
+                np2 = best_wp_order[i+1]
+                gate_id = best_wp_gate_ids[i]      # Get the gate id of the first sorted normal point
 
-                # Append first normal point
-                best_wp_order_with_centroids.append(best_wp_order[i])
+                best_wp_order_with_centroids.append(np1)
 
-                # Identify which gate this pair belongs to
-                gate_num = idx1 // 2  # Because two normal points per gate (0,1 → gate 0; 2,3 → gate 1)
-
-                # Append the centroid of that gate
-                centroid = GATES_DATA[f"GATE{gate_num+1}"]["centroid"]
+                centroid = GATES_DATA[f"GATE{gate_id}"]["centroid"]
                 best_wp_order_with_centroids.append(centroid)
 
-                # Append second normal point
-                best_wp_order_with_centroids.append(best_wp_order[i+1])
+                best_wp_order_with_centroids.append(np2)
                 
             best_path = best_wp_order_with_centroids
             best_path.insert(0, [X_START, Y_START, Z_START])  # Add start position
@@ -403,12 +508,11 @@ def get_command(sensor_data, camera_data, dt):
             best_path.extend([[X_START, Y_START, Z_START]])   # Add final position
 
             race_waypoints = best_path
-            race_indices = best_wp_indices
 
             segment_times = init_params(race_waypoints)
             race_times = np.concatenate(([0], np.cumsum(segment_times)))
 
-            # Compute polynomial coefficients and extract trajectory setpoints (sampled points)
+            # Compute minimal jerk polynomial trajectory coefficients and extract trajectory setpoints (sampled points)
             race_poly_coeffs = compute_poly_coefficients(race_waypoints, race_times)
             race_trajectory_setpoints, race_time_setpoints  = poly_setpoint_extraction(race_poly_coeffs, race_times)
 
@@ -787,7 +891,7 @@ def visualize_gates(GATES_DATA):
 
 # ----------------- Helper functions for second and third racing laps -----------------
 
-def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
+def sort_wp_min_energy(wp, gate_ids, gate_to_idx, angle_penalty_weight=ANGLE_PENALTY):
     """
     Finds the most energy-efficient order to visit a series of gates, where:
     - Each gate has 2 normal points (entry/exit) that must be consecutive, but can flip.
@@ -796,12 +900,15 @@ def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
     - Energy = distance + angle penalties (to avoid sharp turns).
     
     Args:
-        wp (list): Waypoints. List of 5 tuples, 1 (np.array(entry), np.array(exit)) for each gate.
+        wp (list): Waypoints. List of len(gates_found) tuples, 1 (np.array(entry), np.array(exit)) for each gate.
+        gate_ids (list of int): Parallel list to wp, gate_ids[i] is the gate ID for wp[i].
+        gate_to_idx (dict): Mapping from gate ID to indices of its normal points in wp.
         angle_penalty_weight (float): Weight applied to angle penalties relative to distance.
 
     Returns:
         best_path (list): List of np.array waypointspoints representing the optimal path.
         best_indices (list): List of indices (int) representing the updated order of waypoints.
+        best_wp_gate_ids (list of int): Gate IDs, parallel to 'best_indices', showing which gate each waypoint belongs to.
         min_cost (float): Total energy cost (distance + angle penalties).
     """
 
@@ -809,8 +916,12 @@ def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
     gate_indices = [ (2*i, 2*i+1) for i in range(num_gates) ]  # Gate groupings
 
     best_path = None
-    best_indices = None
+    best_indices = None    
+    best_wp_gate_ids = None
     min_cost = float('inf')
+
+    first_found_gate = gates_found[0]
+    start_pair = gate_to_idx[first_found_gate]
 
     for gate_order in permutations(gate_indices):
         for flip_config in product([False, True], repeat=num_gates):
@@ -826,7 +937,7 @@ def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
                     indices.extend([idx1, idx2])
 
             # Ensure starting point is waypoint 0 or 1 (Gate 1's normal points)
-            if indices[0] not in [0, 1]:
+            if indices[0] not in start_pair:
                 continue
 
             # Compute distance + angle penalties
@@ -845,8 +956,9 @@ def sort_wp_min_energy(wp, angle_penalty_weight=ANGLE_PENALTY):
                 min_cost = cost
                 best_path = path
                 best_indices = indices
+                best_wp_gate_ids = [gate_ids[i] for i in indices]
 
-    return best_path, best_indices, min_cost
+    return best_path, best_indices, best_wp_gate_ids, min_cost
 
 def init_params(path_waypoints, t_f=T_FINAL):
     """
