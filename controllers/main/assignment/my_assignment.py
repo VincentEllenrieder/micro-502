@@ -108,7 +108,7 @@ SCAN_LOCATIONS = {
     }
 }
 POS_MARGIN = 0.05
-YAW_MARGIN = np.pi/16
+YAW_MARGIN = np.pi/32
 
 # Drone placement paramenters for picture taking in 1st lap
 N_IMAGES = 2                                                            # Number of images to take for triangulation
@@ -123,7 +123,7 @@ current_image_corners = None                                            # Curren
 n_deviations_done = 0                                                   # Number of deviations done when displacing due to no features
 MAX_DEVIATIONS = 5                                                      # Maximum number of deviations allowed when searching for features
 n_search_tries = 0                                                      # Number of tries to find or pass the gate 
-MAX_SEARCH_TRIES = 3                                                    # Maximum number of tries to find or pass the gate
+MAX_SEARCH_TRIES = 5                                                    # Maximum number of tries to find or pass the gate
 
 
 # Triangulation parameters
@@ -212,7 +212,7 @@ def get_command(sensor_data, camera_data, dt):
                         if n_deviations_done < MAX_DEVIATIONS:
                             no_features = True
                             body_x = 0.1
-                            body_y = 0.1
+                            body_y = 0.3
                             body_z = 0
                             R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
                             displacement_goal = R_b2i @ np.array([body_x, body_y, body_z]) + np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
@@ -222,7 +222,7 @@ def get_command(sensor_data, camera_data, dt):
                         # If too many deviations go to initial scanning position and try a new search attempt
                         else :
                             if n_search_tries < MAX_SEARCH_TRIES:
-                                print("No gate features found after 5 tries, trying again...")
+                                print("No gate features found after ", MAX_DEVIATIONS, " deviations, trying again...")
                                 MANEUVER["Vision"] = 0
                                 MANEUVER["Go to scan"] = 1
                                 n_deviations_done = 0
@@ -232,7 +232,7 @@ def get_command(sensor_data, camera_data, dt):
 
                             # If too many search attempts, abandon and go to next gate
                             else :
-                                print("No gate found after 3 tries, moving to next gate")
+                                print("No gate found after ", MAX_SEARCH_TRIES, " seartch attempts, moving to next gate")
                                 MANEUVER["Vision"] = 0
                                 MANEUVER["Go to scan"] = 1
                                 n_deviations_done = 0
@@ -416,13 +416,13 @@ def get_command(sensor_data, camera_data, dt):
                 
             # If the current gate was not actually crossed after all, do : 
             else :
-                GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the faulty gate data
-                GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
-                GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
 
                 # If the number of attempts to find the gate is less than the maximum, go back to the scan location and try again
                 if n_search_tries < MAX_SEARCH_TRIES:
                     print("Gate not crossed, trying again...")
+                    GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the faulty gate data (keep them if max attempts reached so that to maybe cross the gate after all during racing)
+                    GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
+                    GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
                     n_search_tries += 1
                     MANEUVER["Go to gate"] = 0
                     MANEUVER["Search next gate"] = 1

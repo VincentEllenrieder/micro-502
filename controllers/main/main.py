@@ -17,7 +17,7 @@ import cv2 as cv
 
 exp_num = 4                         # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
 control_style = 'path_planner'      # 'keyboard' or 'path_planner'
-SEED = 34                           # (to erase for assignment) tricky seeds : (33), 34, (42), (44) 
+SEED = 60                           # (to erase for assignment) tricky seeds : (33), 34, (42), (44), (52), (53)
 np.random.seed(SEED)
 random.seed(SEED)
 rand_env = True                    # Randomise the environment
