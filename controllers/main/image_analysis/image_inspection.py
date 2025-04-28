@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
 # Load the image using OpenCV
-img_path = r"C:/Documents_LOCAL/EPFL/MA2/Aerial_robotics/micro-502/controllers/main/image_analysis/original_image.png"
+img_path = r"C:/Documents_LOCAL/EPFL/MA2/Aerial_robotics/micro-502/controllers/main/image_analysis/gate_features_multiple_contours1.png"
 img_bgr = cv2.imread(img_path) #openCV loads images in BGR format
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 

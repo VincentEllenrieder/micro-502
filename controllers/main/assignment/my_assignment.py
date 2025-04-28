@@ -290,15 +290,34 @@ def get_command(sensor_data, camera_data, dt):
                 p_q_vectors[:, -1, images_taken] = p
 
                 # Compute slope of the top corners to displace in the right direction
-                slope = compute_corner_slope(current_image_corners) 
-                if slope == 1:
-                    body_x = 0.28
-                    body_y = 0.28
+                slope_top, slope_bot = compute_corner_slope(current_image_corners)
+                if slope_top >= 0 and slope_bot >= 0:
+                    if centroid[1] >= 0:         # If the centroid is below the center of the image (positive y), do:
+                        body_x = 0.15
+                        body_y = 0.3
+                        body_z = 0
+                    elif centroid[1] < 0:       # If the centroid is above the center of the image (negative y), do:
+                        body_x = 0.15
+                        body_y = -0.3
+                        body_z = 0
+                elif slope_top <= 0 and slope_bot <= 0:
+                    if centroid[1] >= 0:       # If the centroid is below the center of the image (negative y), do:
+                        body_x = 0.15
+                        body_y = -0.3
+                        body_z = 0
+                    elif centroid[1] < 0:       # If the centroid is above the center of the image (positive y), do:
+                        body_x = 0.15
+                        body_y = 0.3
+                        body_z = 0
+                elif slope_top > 0 and slope_bot < 0:
+                    body_x = 0.15
+                    body_y = -0.3
                     body_z = 0
-                elif slope == -1:
-                    body_x = 0.28
-                    body_y = -0.28
+                elif slope_top < 0 and slope_bot > 0:
+                    body_x = 0.15
+                    body_y = 0.3
                     body_z = 0
+
                 R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
                 displacement_goal = R_b2i @ np.array([body_x, body_y, body_z]) + np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
                 displacement_goal = np.append(displacement_goal, sensor_data['yaw'])
@@ -557,14 +576,14 @@ def get_command(sensor_data, camera_data, dt):
 
 def image_processing(camera_data):
     img = cv2.cvtColor(camera_data, cv2.COLOR_BGRA2RGB) # convert BGRA to RGB
-    #plt.imsave('image_analysis/original_image.png', img[:, :, :])
+    plt.imsave('image_analysis/original_image.png', img[:, :, :])
     # Mask the image to only keep the pink area
     img_filtered = np.zeros(img.shape[:2], dtype=np.uint8)
     condition = (img[:, :, 0] > RED_BLUE_THRESHOLD_LOW) & (img[:, :, 0] < RED_BLUE_THRESHOLD_HIGH) & \
                 (img[:, :, 2] > RED_BLUE_THRESHOLD_LOW) & (img[:, :, 2] < RED_BLUE_THRESHOLD_HIGH) & \
                 (img[:, :, 1] < GREEN_THRESHOLD)
     img_filtered[condition] = 255
-    #plt.imsave('image_analysis/thresholding_image.png', img_filtered[:, :], cmap='gray')
+    plt.imsave('image_analysis/thresholding_image.png', img_filtered[:, :], cmap='gray')
     return img_filtered
 
 def get_centroid_and_corners(camera_data):
@@ -583,8 +602,7 @@ def get_centroid_and_corners(camera_data):
         contour = contours[0]
 
         cv2.drawContours(image_features, [contour], 0, (0, 255, 0), 1)
-        #plt.imsave('image_analysis/gate_single_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
-
+        plt.imsave('image_analysis/gate_single_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
         result_centroid = compute_centroid(contour)      
         if result_centroid is None:
             return None, None
@@ -602,7 +620,7 @@ def get_centroid_and_corners(camera_data):
             xi, yi = int(x), int(y)
             #color_coeff = p % len(corners)     
             image_features[yi + 150, xi + 150, 2] = 255
-        #plt.imsave('image_analysis/gate_features_single_contour_image' + str(images_taken+1) + '.png', image_features[:, :, :])
+        plt.imsave('image_analysis/gate_features_single_contour_image' + str(images_taken+1) + '.png', image_features[:, :, :])
 
         return centroid, corners                                                           
 
@@ -610,12 +628,13 @@ def get_centroid_and_corners(camera_data):
     elif len(contours) > 1:
 
         cv2.drawContours(image_features, contours, -1, (0, 255, 0), 1)
-        #plt.imsave('image_analysis/gate_multiple_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
-
+        plt.imsave('image_analysis/gate_multiple_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
         rightmost = 0
         contour_chosen = None
         cX, cY = 0, 0
         for contour in contours:
+            if len(contour) < 20:                       # Ignore small contours
+                continue
             result_centroid = compute_centroid(contour)
             if result_centroid is None:
                 return None, None
@@ -625,7 +644,9 @@ def get_centroid_and_corners(camera_data):
                 cX, cY = x - 150, y - 150               # Shift centroid to center of image
                 centroid = cX, cY
                 contour_chosen = contour
-                
+        if contour_chosen is None:
+            print("No contour chosen")
+            return None, None  
         result_corners = compute_corners(contour_chosen)
         if result_corners is None:
             return None, None
@@ -636,7 +657,7 @@ def get_centroid_and_corners(camera_data):
             xi, yi = int(x), int(y)
             #color_coeff = p % len(corners)     
             image_features[yi + 150, xi + 150, 2] = 255
-        #plt.imsave('image_analysis/gate_features_multiple_contours' + str(images_taken+1) + '.png', image_features[:, :, :])
+        plt.imsave('image_analysis/gate_features_multiple_contours' + str(images_taken+1) + '.png', image_features[:, :, :])
 
         return centroid, corners
 
@@ -687,8 +708,8 @@ def sort_corners(corners):
 
 def compute_corner_slope(corners):
     """
-    Given an array of 4 corner points (x,y) from sorted,
-    find the two topmost and two bottommost corners, order them left to right, and compute sign of their slopes.
+    Given an array of 4 corner points (x,y) from sorted, find the two topmost and two bottommost corners, order them left to right, and 
+    compute sign of their slopes.
 
     Args:
       corners: (4,2) array-like of pixel coords [(x0,y0),...,(x3,y3)] in image coordinates.
@@ -696,6 +717,7 @@ def compute_corner_slope(corners):
     Returns:
       sign of slope = sign((y_right_top - y_left_top) / (x_right_top - x_left_top) + (y_right_bottom - y_left_bottom) / (x_right_bottom - x_left_bottom))
     """
+    corners = corners + 150 # Shift origin to top left corner of image
     pts = np.asarray(corners)
 
     # Top two corners (smallest y)
@@ -707,7 +729,7 @@ def compute_corner_slope(corners):
     if dx_top == 0:
         slope_top = 0
     else :
-        slope_top = dy_top / dx_top
+        slope_top = np.sign(dy_top / dx_top)
     print('Slope top : ', slope_top)
 
     # Bottom two corners (largest y)
@@ -719,16 +741,10 @@ def compute_corner_slope(corners):
     if dx_bot == 0:
         slope_bot = 0
     else :
-        slope_bot = dy_bot / dx_bot
+        slope_bot = np.sign(dy_bot / dx_bot)
     print('Slope bot : ', slope_bot)
     
-    slope = slope_top + slope_bot
-    print("Slope: ", np.sign(slope))
-
-    if slope >= 0:
-        return 1
-    elif slope < 0:
-        return -1
+    return slope_top, slope_bot
 
 def quaternion2rotmat(quaternion):      
     """
