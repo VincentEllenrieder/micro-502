@@ -331,7 +331,6 @@ def get_command(sensor_data, camera_data, dt):
             GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the gate data (to override any previous data from unsuccessful previous attempts)
             GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
             GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
-            print(GATES_DATA)
             # Triangulate the 4 corners
             for t in range(N_CORNERS): 
                 corner_position = triangulation(t)
@@ -501,7 +500,6 @@ def get_command(sensor_data, camera_data, dt):
                     gates_found.append(i+1)
 
             for i, gate_id in enumerate(gates_found):
-                print(GATES_DATA[f"GATE{gate_id}"]["normal points"])
                 np1, np2 = GATES_DATA[f"GATE{gate_id}"]["normal points"]
                 idx1 = 2*i
                 idx2 = 2*i + 1
@@ -580,21 +578,20 @@ def get_command(sensor_data, camera_data, dt):
 
 def image_processing(camera_data):
     img = cv2.cvtColor(camera_data, cv2.COLOR_BGRA2RGB) # convert BGRA to RGB
-    plt.imsave('image_analysis/original_image.png', img[:, :, :])
+    # plt.imsave('image_analysis/original_image.png', img[:, :, :])
     # Mask the image to only keep the pink area
     img_filtered = np.zeros(img.shape[:2], dtype=np.uint8)
     condition = (img[:, :, 0] > RED_BLUE_THRESHOLD_LOW) & (img[:, :, 0] < RED_BLUE_THRESHOLD_HIGH) & \
                 (img[:, :, 2] > RED_BLUE_THRESHOLD_LOW) & (img[:, :, 2] < RED_BLUE_THRESHOLD_HIGH) & \
                 (img[:, :, 1] < GREEN_THRESHOLD)
     img_filtered[condition] = 255
-    plt.imsave('image_analysis/thresholding_image.png', img_filtered[:, :], cmap='gray')
+    # plt.imsave('image_analysis/thresholding_image.png', img_filtered[:, :], cmap='gray')
     return img_filtered
 
 def get_centroid_and_corners(camera_data):
     image_filtered = image_processing(camera_data)
     image_features = np.zeros((*np.shape(image_filtered), 3), dtype=np.uint8) 
     contours, _ = cv2.findContours(image_filtered, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE) # Find contours in the image
-    #print('contours \n :', contours, ', len :', len(contours), ', shape :', np.shape(contours), ', type :', type(contours)) 
     
     # If sight orthogonal to gate's normal vector (no countours), signal to displace 
     if len(contours) == 0:
@@ -606,7 +603,7 @@ def get_centroid_and_corners(camera_data):
         contour = contours[0]
 
         cv2.drawContours(image_features, [contour], 0, (0, 255, 0), 1)
-        plt.imsave('image_analysis/gate_single_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
+        # plt.imsave('image_analysis/gate_single_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
         result_centroid = compute_centroid(contour)      
         if result_centroid is None:
             return None, None
@@ -624,7 +621,7 @@ def get_centroid_and_corners(camera_data):
             xi, yi = int(x), int(y)
             #color_coeff = p % len(corners)     
             image_features[yi + 150, xi + 150, 2] = 255
-        plt.imsave('image_analysis/gate_features_single_contour_image' + str(images_taken+1) + '.png', image_features[:, :, :])
+        # plt.imsave('image_analysis/gate_features_single_contour_image' + str(images_taken+1) + '.png', image_features[:, :, :])
 
         return centroid, corners                                                           
 
@@ -632,7 +629,7 @@ def get_centroid_and_corners(camera_data):
     elif len(contours) > 1:
 
         cv2.drawContours(image_features, contours, -1, (0, 255, 0), 1)
-        plt.imsave('image_analysis/gate_multiple_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
+        # plt.imsave('image_analysis/gate_multiple_contour' + str(images_taken+1) + '.png', image_features[:, :, :])          
         rightmost = 0
         contour_chosen = None
         cX, cY = 0, 0
@@ -661,7 +658,7 @@ def get_centroid_and_corners(camera_data):
             xi, yi = int(x), int(y)
             #color_coeff = p % len(corners)     
             image_features[yi + 150, xi + 150, 2] = 255
-        plt.imsave('image_analysis/gate_features_multiple_contours' + str(images_taken+1) + '.png', image_features[:, :, :])
+        # plt.imsave('image_analysis/gate_features_multiple_contours' + str(images_taken+1) + '.png', image_features[:, :, :])
 
         return centroid, corners
 
