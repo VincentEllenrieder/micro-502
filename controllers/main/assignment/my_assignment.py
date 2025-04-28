@@ -154,7 +154,7 @@ def get_command(sensor_data, camera_data, dt):
     
     global MANEUVER, images_taken, n_gates_searched, no_features, aligned, deviated, displacement_goal, current_image_corners, n_deviations_done, n_search_tries, \
                     r_s_vectors, p_q_vectors, GATES_DATA, reached_normalpt1, reached_centroid, reached_normalpt2, current_gate_found, \
-                    race_waypoints, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
+                    gates_found, race_waypoints, race_poly_coeffs, race_trajectory_setpoints, race_time_setpoints, race_times, race_time
 
     # Drone has not taken off
     if MANEUVER["Started"] == 0 :
@@ -212,7 +212,7 @@ def get_command(sensor_data, camera_data, dt):
                         if n_deviations_done < MAX_DEVIATIONS:
                             no_features = True
                             body_x = 0.1
-                            body_y = -0.3 if n_gates_searched != 0 else 0.3 # If last gate, displace in the opposite direction to avoid going in the takeoff zone
+                            body_y = -0.3 if n_gates_searched != 0 else 0.3 # If first gate, displace in the opposite direction to avoid entering again the takeoff zone
                             body_z = 0
                             R_b2i = quaternion2rotmat([sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
                             displacement_goal = R_b2i @ np.array([body_x, body_y, body_z]) + np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
@@ -328,6 +328,10 @@ def get_command(sensor_data, camera_data, dt):
                 n_search_tries = 0
                 print("Image ", images_taken, " taken")
 
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the gate data (to override any previous data from unsuccessful previous attempts)
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
+            GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
+            print(GATES_DATA)
             # Triangulate the 4 corners
             for t in range(N_CORNERS): 
                 corner_position = triangulation(t)
@@ -413,7 +417,6 @@ def get_command(sensor_data, camera_data, dt):
             # If the current gate being searched was found, do :
             if current_gate_found:
                 n_gates_searched += 1
-                gates_found.append(n_gates_searched) # Append the gate number to the list of gates found
                 current_gate_found = False
 
                 # If the number of gates that have been searched is less than the total number of gates, go to the next gate
@@ -439,9 +442,6 @@ def get_command(sensor_data, camera_data, dt):
                 # If the number of attempts to find the gate is less than the maximum, go back to the scan location and try again
                 if n_search_tries < MAX_SEARCH_TRIES:
                     print("Gate not crossed, trying again...")
-                    GATES_DATA[f"GATE{n_gates_searched+1}"]["centroid"] = None      # reset the faulty gate data (keep them if max attempts reached so that to maybe cross the gate after all during racing)
-                    GATES_DATA[f"GATE{n_gates_searched+1}"]["corners"] = []
-                    GATES_DATA[f"GATE{n_gates_searched+1}"]["normal points"] = []
                     n_search_tries += 1
                     MANEUVER["Go to gate"] = 0
                     MANEUVER["Search next gate"] = 1
@@ -496,6 +496,10 @@ def get_command(sensor_data, camera_data, dt):
             gate_to_idx = {}
             best_wp_gate_ids = []
             # Initialize the order of the waypoints used for racing and each segment time
+            for i in range(N_GATES):
+                if GATES_DATA[f"GATE{i+1}"]["centroid"] is not None:
+                    gates_found.append(i+1)
+
             for i, gate_id in enumerate(gates_found):
                 print(GATES_DATA[f"GATE{gate_id}"]["normal points"])
                 np1, np2 = GATES_DATA[f"GATE{gate_id}"]["normal points"]
